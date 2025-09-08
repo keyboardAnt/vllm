@@ -10,9 +10,9 @@ This script registers an AdapterLogitsProcessor that, on every decode step:
 
 Notes:
   - Hot token IDs are read once at adapter init from the environment variable
-    FRSPEC_HOT_TOKEN_IDS, which should point to a file path containing a
-    torch Tensor of token IDs (e.g., a .pt file). Falls back to a default list
-    if the env var is unset or loading fails.
+    FRSPEC_HOT_TOKEN_IDS, which must point to a file path containing a torch
+    Tensor (e.g., .pt) or a list of token IDs. If the env var is missing,
+    empty, or invalid, an exception is raised.
 """
 
 from vllm import LLM, SamplingParams
@@ -24,16 +24,12 @@ from vllm.v1.sample.logits_processor import (
     RequestLogitsProcessor,
 )
 
-
-# Fixed hot token set for the pruning demo (retain only these tokens).
-# All tokens not in this list are assigned -inf and thus never sampled.
-HOT_TOKEN_IDS: list[int] = [100, 101, 102, 103, 104]
-
-
 def _parse_hot_token_ids_from_env() -> list[int]:
     path = os.environ.get("FRSPEC_HOT_TOKEN_IDS")
     if not path:
-        return HOT_TOKEN_IDS
+        raise ValueError(
+            "FRSPEC_HOT_TOKEN_IDS is not set. Set it to a .pt file or list path"
+        )
     try:
         obj = torch.load(path, map_location="cpu")
         if isinstance(obj, torch.Tensor):
@@ -43,10 +39,18 @@ def _parse_hot_token_ids_from_env() -> list[int]:
         elif hasattr(obj, "tolist"):
             ids = [int(x) for x in obj.tolist()]
         else:
-            return HOT_TOKEN_IDS
-        return ids if ids else HOT_TOKEN_IDS
-    except Exception:
-        return HOT_TOKEN_IDS
+            raise ValueError(
+                "FRSPEC_HOT_TOKEN_IDS did not load to a tensor/list of ints"
+            )
+        if not ids:
+            raise ValueError(
+                "FRSPEC_HOT_TOKEN_IDS file is empty or produced no IDs"
+            )
+        return ids
+    except Exception as e:
+        raise ValueError(
+            f"Failed to load hot token ids from {path}: {e}"
+        )
 
 
 class FrspecAdapter(AdapterLogitsProcessor):

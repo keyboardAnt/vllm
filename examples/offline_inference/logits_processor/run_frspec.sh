@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export FRSPEC_HOT_TOKEN_IDS=/home/projects/dharel/nadavt/repos/vllm/examples/offline_inference/logits_processor/hot_ids_200_204.pt
+export FRSPEC_HOT_TOKEN_IDS=/home/projects/dharel/nadavt/repos/vllm/examples/offline_inference/logits_processor/hot_ids.pt
 
 # Prints for visibility
 echo "[run_frspec] FRSPEC_HOT_TOKEN_IDS=${FRSPEC_HOT_TOKEN_IDS}"

@@ -24,7 +24,7 @@ from vllm.v1.sample.logits_processor import (
 
 # Fixed hot token set for the pruning demo (retain only these tokens).
 # All tokens not in this list are assigned -inf and thus never sampled.
-HOT_TOKEN_IDS: list[int] = [0, 1, 2, 3, 4]
+HOT_TOKEN_IDS: list[int] = [100, 101, 102, 103, 104]
 
 
 class FrspecAdapter(AdapterLogitsProcessor):

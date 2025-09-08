@@ -20,7 +20,9 @@ class PrintProbeAdapter(AdapterLogitsProcessor):
 
     def is_argmax_invariant(self) -> bool:
         # Does not change selection; purely observational.
-        return True
+        # NOTE: Set to False to force invocation under greedy decoding
+        # (temperature=0.0); V1 may skip argmax-invariant processors.
+        return False
 
     def new_req_logits_processor(
         self, params: SamplingParams
@@ -36,15 +38,20 @@ class PrintProbeAdapter(AdapterLogitsProcessor):
 
 
 def main():
+    print("[front] before LLM()")
     llm = LLM(model="facebook/opt-125m", logits_processors=[PrintProbeAdapter])
+    print("[front] after LLM()")
 
-    prompt = "Hello, my name is"
+    prompt = "The best open source inference engine is "
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=5,
     )
 
+    print("[front] before generate()")
     outputs = llm.generate([prompt], sampling_params)
+    print("[front] after generate()")
+
     for out in outputs:
         print("Generated:", out.outputs[0].text)
 

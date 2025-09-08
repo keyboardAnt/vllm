@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Minimal V1 example: print + prune logits to a fixed hot token set.
+"""Minimal V1 example: print + prune logits to an engine-wide hot token set.
 
 This script registers an AdapterLogitsProcessor that, on every decode step:
   - Prints a short trace showing the step length.
-  - Retains logits only for a fixed list of "hot" token IDs and sets all
+  - Retains logits only for a list of "hot" token IDs and sets all
     other ("cold") token logits to -inf, so they cannot be sampled.
 
 Notes:
-  - For simplicity, the hot token IDs are a fixed constant below. Wiring an
-    external list at init time can be added later.
+  - Hot token IDs are read once at adapter init from the environment variable
+    FRSPEC_HOT_TOKEN_IDS, which should point to a file path containing a
+    torch Tensor of token IDs (e.g., a .pt file). Falls back to a default list
+    if the env var is unset or loading fails.
 """
 
 from vllm import LLM, SamplingParams
 from typing import Optional
+import os
 import torch
 from vllm.v1.sample.logits_processor import (
     AdapterLogitsProcessor,
@@ -27,8 +30,32 @@ from vllm.v1.sample.logits_processor import (
 HOT_TOKEN_IDS: list[int] = [100, 101, 102, 103, 104]
 
 
+def _parse_hot_token_ids_from_env() -> list[int]:
+    path = os.environ.get("FRSPEC_HOT_TOKEN_IDS")
+    if not path:
+        return HOT_TOKEN_IDS
+    try:
+        obj = torch.load(path, map_location="cpu")
+        if isinstance(obj, torch.Tensor):
+            ids = obj.to(torch.long).view(-1).tolist()
+        elif isinstance(obj, (list, tuple)):
+            ids = [int(x) for x in obj]
+        elif hasattr(obj, "tolist"):
+            ids = [int(x) for x in obj.tolist()]
+        else:
+            return HOT_TOKEN_IDS
+        return ids if ids else HOT_TOKEN_IDS
+    except Exception:
+        return HOT_TOKEN_IDS
+
+
 class FrspecAdapter(AdapterLogitsProcessor):
     """Adapter that prints and prunes logits to a fixed hot token set."""
+
+    def __init__(self, vllm_config, device, is_pin_memory):
+        super().__init__(vllm_config, device, is_pin_memory)
+        # Engine-wide configuration: read once
+        self.hot_token_ids: list[int] = _parse_hot_token_ids_from_env()
 
     def is_argmax_invariant(self) -> bool:
         return False
@@ -37,9 +64,9 @@ class FrspecAdapter(AdapterLogitsProcessor):
         self, params: SamplingParams
     ) -> Optional[RequestLogitsProcessor]:
         # Return a per-request callable: (output_ids, logits) -> logits.
-        # Implementation: set all "cold" token logits (not in HOT_TOKEN_IDS)
+        # Implementation: set all "cold" token logits (not in self.hot_token_ids)
         # to -inf; retain only hot token logits.
-        hot_ids = HOT_TOKEN_IDS
+        hot_ids = self.hot_token_ids
 
         def per_req(output_ids, logits):
             print(
@@ -76,17 +103,20 @@ def main():
     outputs = llm.generate([prompt], sampling_params)
     print("[front] after generate()")
 
+    # Use the same source as the adapter for verification
+    effective_hot_ids = _parse_hot_token_ids_from_env()
+    print("[verify] effective hot token ids:", effective_hot_ids)
     for out in outputs:
         seq_out = out.outputs[0]
         print("Generated:", seq_out.text)
         gen_ids = seq_out.token_ids
         print("[verify] generated token count=", len(gen_ids))
-        cold = [tid for tid in gen_ids if tid not in HOT_TOKEN_IDS]
+        cold = [tid for tid in gen_ids if tid not in effective_hot_ids]
         if cold:
-            print("[verify] tokens outside HOT_TOKEN_IDS (showing up to 20):", cold[:20])
-            raise AssertionError("Generated tokens outside HOT_TOKEN_IDS")
+            print("[verify] tokens outside hot set (showing up to 20):", cold[:20])
+            raise AssertionError("Generated tokens outside configured hot token set")
         else:
-            print("[verify] All generated tokens are within HOT_TOKEN_IDS")
+            print("[verify] All generated tokens are within configured hot token set")
 
 
 if __name__ == "__main__":

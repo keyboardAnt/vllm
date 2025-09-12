@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Tuple
 
+import os
+import glob
 import torch
 from vllm.logger import init_logger
 
@@ -140,6 +142,24 @@ def update_global_probs_stats(x: torch.Tensor) -> None:
     except Exception as e:  # noqa: BLE001
         # No observations yet or intermediate state; skip quietly.
         logger.debug(f"Global OnlineMeanStd get skipped: {e}")
+
+    # Persist the current accumulators to a per-process file. If the output
+    # directory is not provided via env, default to "probs_stats" in CWD.
+    stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
+    try:
+        os.makedirs(stats_dir, exist_ok=True)
+        file_path = os.path.join(stats_dir, f"probs_stats_{os.getpid()}.pt")
+        # Save CPU float64 for numerical stability when aggregating.
+        payload = {
+            "count": stats.count,
+            "mean": stats.mean.detach().to(dtype=torch.float64, device="cpu")
+            if stats.mean is not None else None,
+            "M2": stats.M2.detach().to(dtype=torch.float64, device="cpu")
+            if stats.M2 is not None else None,
+        }
+        torch.save(payload, file_path)
+    except Exception as save_e:  # noqa: BLE001
+        logger.debug(f"Failed to persist global probs stats: {save_e}")
     
 
 
@@ -153,6 +173,60 @@ def get_global_probs_stats() -> tuple[torch.Tensor, torch.Tensor]:
 def reset_global_probs_stats() -> None:
     """Reset the global accumulator."""
     _get_global().reset()
+
+
+@torch.no_grad()
+def aggregate_saved_probs_stats(stats_dir: str) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    """Aggregate per-process saved stats into global mean/std.
+
+    The directory should contain files saved by update_global_probs_stats with
+    names like "probs_stats_<pid>.pt" that include keys: count, mean, M2.
+
+    Returns:
+        (mean, std, count): Aggregated tensors (float64 CPU) and total count.
+    """
+    files = sorted(glob.glob(os.path.join(stats_dir, "probs_stats_*.pt")))
+    if not files:
+        raise ValueError(f"No stats files found in {stats_dir}")
+
+    total_count = 0
+    agg_mean = None
+    agg_M2 = None
+
+    for fp in files:
+        try:
+            data = torch.load(fp, map_location="cpu")
+            cnt = int(data.get("count", 0))
+            mean = data.get("mean", None)
+            M2 = data.get("M2", None)
+            if cnt <= 0 or mean is None or M2 is None:
+                continue
+            mean = mean.to(dtype=torch.float64, device="cpu")
+            M2 = M2.to(dtype=torch.float64, device="cpu")
+        except Exception:
+            continue
+
+        if total_count == 0:
+            agg_mean = mean.clone()
+            agg_M2 = M2.clone()
+            total_count = cnt
+        else:
+            assert agg_mean is not None and agg_M2 is not None
+            delta = mean - agg_mean
+            new_total = total_count + cnt
+            agg_mean = agg_mean + delta * (cnt / new_total)
+            agg_M2 = agg_M2 + M2 + delta * delta * (total_count * cnt / new_total)
+            total_count = new_total
+
+    if agg_mean is None or agg_M2 is None or total_count == 0:
+        raise ValueError(f"No valid stats found in {stats_dir}")
+
+    if total_count > 1:
+        var = agg_M2 / (total_count - 1)
+    else:
+        var = torch.zeros_like(agg_M2)
+    std = torch.sqrt(torch.clamp(var, min=0))
+    return agg_mean, std, total_count
 
 
 def visualize_per_token_stats(mean: torch.Tensor,

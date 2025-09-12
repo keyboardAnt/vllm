@@ -8,8 +8,8 @@ from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 from vllm.v1.sample.probs_stats import (
-    get_global_probs_stats,
     visualize_per_token_stats,
+    aggregate_saved_probs_stats,
 )
 
 try:
@@ -198,13 +198,15 @@ def main():
         acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
         print(f"acceptance at token {i}: {acceptance_rate:.2f}")
 
-    # Visualize per-token-id statistics at end of benchmark (if any were collected)
+    # Visualize per-token-id statistics at end of benchmark using saved files
+    # from worker processes if available.
     try:
-        mean, std = get_global_probs_stats()
+        import os
+        stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
+        mean, std, total = aggregate_saved_probs_stats(stats_dir)
         out_path = visualize_per_token_stats(mean, std, "probs_stats.png", top_k=50)
-        print(f"Saved per-token-id stats visualization to: {out_path}")
+        print(f"Saved per-token-id stats visualization to: {out_path} (count={total})")
     except Exception as e:  # noqa: BLE001
-        # No stats collected or visualization failed; continue silently.
         print(f"Stats visualization skipped: {e}")
 
 

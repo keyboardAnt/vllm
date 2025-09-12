@@ -171,13 +171,9 @@ def visualize_per_token_stats(mean: torch.Tensor,
     # Try to plot with matplotlib; fall back to CSV if unavailable.
     try:
         import os
-        import importlib
-        # Dynamically import matplotlib only if available to avoid linter/env issues
-        if importlib.util.find_spec("matplotlib") is None:
-            raise ImportError("matplotlib not available")
-        matplotlib = importlib.import_module("matplotlib")
+        import matplotlib
         matplotlib.use("Agg", force=True)
-        plt = importlib.import_module("matplotlib.pyplot")
+        import matplotlib.pyplot as plt
 
         # Compute top-k by mean (keep tensors for indexing, then convert)
         top_vals_t, top_idx_t = torch.topk(mean_cpu, k=top_k, largest=True)

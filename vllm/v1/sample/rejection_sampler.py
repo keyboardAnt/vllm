@@ -8,6 +8,7 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.probs_stats import OnlineMeanStd
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
@@ -42,6 +43,10 @@ class RejectionSampler(nn.Module):
         Tokens are finally generated with the rejection sampler.
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._probs_stats = OnlineMeanStd()
 
     def forward(
         self,
@@ -91,6 +96,11 @@ class RejectionSampler(nn.Module):
             metadata.cu_num_draft_tokens,
             sampling_metadata,
         )
+        # Update online statistics over target probability vectors/logits.
+        try:
+            self._probs_stats.update(target_probs)
+        except Exception as e:
+            logger.debug(f"OnlineMeanStd update skipped: {e}")
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
@@ -102,6 +112,18 @@ class RejectionSampler(nn.Module):
             bonus_token_ids,
             sampling_metadata,
         )
+        # Log/print current online stats before returning.
+        try:
+            mean, std = self._probs_stats.get()
+            logger.info(
+                "Target probs stats: count=%d, dim=%d, mean_mean=%.6f, std_mean=%.6f",
+                self._probs_stats.count,
+                mean.numel(),
+                float(mean.mean()),
+                float(std.mean()),
+            )
+        except Exception as e:
+            logger.debug(f"OnlineMeanStd get skipped: {e}")
         return output_token_ids
 
     @staticmethod

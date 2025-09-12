@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Tuple
 
 import torch
+from vllm.logger import init_logger
 
 
 class OnlineMeanStd:
@@ -105,6 +106,8 @@ class OnlineMeanStd:
         self.M2 = None
 
 
+logger = init_logger(__name__)
+
 _GLOBAL_PROBS_STATS: OnlineMeanStd | None = None
 
 
@@ -122,7 +125,22 @@ def update_global_probs_stats(x: torch.Tensor) -> None:
     This singleton accumulator aggregates across the entire process lifetime
     and can be queried at teardown.
     """
-    _get_global().update(x)
+    stats = _get_global()
+    stats.update(x)
+    # Log a brief summary of current global stats.
+    try:
+        mean, std = stats.get()
+        logger.info(
+            "Target probs stats (global): count=%d, dim=%d, mean_mean=%.6f, std_mean=%.6f",
+            stats.count,
+            mean.numel(),
+            float(mean.mean()),
+            float(std.mean()),
+        )
+    except Exception as e:  # noqa: BLE001
+        # No observations yet or intermediate state; skip quietly.
+        logger.debug(f"Global OnlineMeanStd get skipped: {e}")
+    
 
 
 @torch.no_grad()

@@ -266,73 +266,42 @@ def visualize_per_token_stats(mean: torch.Tensor,
         import matplotlib
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
+        import numpy as np
 
-        # Compute top-k by mean (keep tensors for indexing, then convert)
-        top_vals_t, top_idx_t = torch.topk(mean_cpu, k=top_k, largest=True)
-        order_t = torch.argsort(top_vals_t)  # ascending for nicer bar order
-        top_vals_np = top_vals_t[order_t].numpy()
-        top_idx_t = top_idx_t[order_t]
-        top_idx_np = top_idx_t.numpy()
+        # Sort tokens by descending mean probability and select top_k
+        order_t = torch.argsort(mean_cpu, descending=True)
+        sel_t = order_t[:top_k]
+        mean_sorted = mean_cpu[sel_t].numpy()
 
+        fig = plt.figure(figsize=(12, 6))
+        ax = fig.add_subplot(1, 1, 1)
+
+        x = np.arange(mean_sorted.shape[0])
         if std_cpu is not None:
-            top_std_np = std_cpu[top_idx_t].numpy()
-        
-        # Prepare sparse tick positions/labels using token ids
-        tick_step = max(1, top_k // 10)
-        tick_positions = top_idx_np[::tick_step]
-        tick_labels = [str(int(i)) for i in tick_positions]
-
-        # Figure layout: if std provided, use 2x2; else use 1x2
-        if std_cpu is not None:
-            fig = plt.figure(figsize=(14, 10))
-            ax1 = fig.add_subplot(2, 2, 1)
-            ax2 = fig.add_subplot(2, 2, 2)
-            ax3 = fig.add_subplot(2, 2, 3)
-            ax4 = fig.add_subplot(2, 2, 4)
-            ax1.hist(mean_cpu.numpy(), bins=50, color="#4e79a7")
-            ax1.set_title("Per-token mean distribution")
-            ax1.set_xlabel("mean")
-            ax1.set_ylabel("count")
-
-            ax2.hist(std_cpu.numpy(), bins=50, color="#59a14f")
-            ax2.set_title("Per-token std distribution")
-            ax2.set_xlabel("std")
-            ax2.set_ylabel("count")
-
-            # Use token ids on the x-axis
-            ax3.bar(top_idx_np, top_vals_np, color="#f28e2b")
-            ax3.set_title(f"Top-{top_k} token means")
-            ax3.set_xlabel("token id")
-            ax3.set_ylabel("mean")
-            ax3.set_xticks(tick_positions)
-            ax3.set_xticklabels(tick_labels, rotation=45, ha="right")
-
-            ax4.bar(top_idx_np, top_std_np, color="#e15759")
-            ax4.set_title(f"Top-{top_k} token std")
-            ax4.set_xlabel("token id")
-            ax4.set_ylabel("std")
-            ax4.set_xticks(tick_positions)
-            ax4.set_xticklabels(tick_labels, rotation=45, ha="right")
+            std_sorted = std_cpu[sel_t].numpy()
+            ax.vlines(
+                x,
+                mean_sorted - std_sorted,
+                mean_sorted + std_sorted,
+                color="orange",
+                alpha=0.6,
+                linewidth=0.5,
+                label="±1 std",
+            )
+            ax.plot(x, mean_sorted, color="navy", linewidth=1.2, label="Mean probability")
+            ax.set_title("Sorted per-token probabilities with ±1 std deviation bars")
+            ax.legend()
         else:
-            fig = plt.figure(figsize=(12, 5))
-            ax1 = fig.add_subplot(1, 2, 1)
-            ax1.hist(mean_cpu.numpy(), bins=50, color="#4e79a7")
-            ax1.set_title("Per-token mean distribution")
-            ax1.set_xlabel("mean")
-            ax1.set_ylabel("count")
+            ax.plot(x, mean_sorted, color="navy", linewidth=1.2, label="Mean probability")
+            ax.set_title("Sorted per-token probabilities")
 
-            ax2 = fig.add_subplot(1, 2, 2)
-            # Use token ids on the x-axis
-            ax2.bar(top_idx_np, top_vals_np, color="#f28e2b")
-            ax2.set_title(f"Top-{top_k} token means")
-            ax2.set_xlabel("token id")
-            ax2.set_ylabel("mean")
-            ax2.set_xticks(tick_positions)
-            ax2.set_xticklabels(tick_labels, rotation=45, ha="right")
+        ax.set_xlabel("Token (sorted by mean probability)")
+        ax.set_ylabel("Probability")
+        ax.grid(True, alpha=0.3)
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         fig.tight_layout()
-        fig.savefig(output_path, dpi=150)
+        fig.savefig(output_path, dpi=200)
         plt.close(fig)
         return output_path
     except Exception:
@@ -343,11 +312,13 @@ def visualize_per_token_stats(mean: torch.Tensor,
         if csv_path.lower().endswith((".png", ".jpg", ".jpeg")):
             csv_path = os.path.splitext(csv_path)[0] + ".csv"
         os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
-        top_vals, top_idx = torch.topk(mean_cpu, k=top_k, largest=True)
-        top_idx_np = top_idx.numpy()
-        top_vals_np = top_vals.numpy()
+        # Sort and take top_k to mirror the visualization
+        order_t = torch.argsort(mean_cpu, descending=True)
+        sel_t = order_t[:top_k]
+        top_idx_np = sel_t.numpy()
+        top_vals_np = mean_cpu[sel_t].numpy()
         if std_cpu is not None:
-            top_std_np = std_cpu[top_idx].numpy()
+            top_std_np = std_cpu[sel_t].numpy()
             data = np.stack([top_idx_np, top_vals_np, top_std_np], axis=1)
             header = "token_id,mean,std"
         else:

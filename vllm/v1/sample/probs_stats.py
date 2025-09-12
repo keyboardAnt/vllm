@@ -276,6 +276,11 @@ def visualize_per_token_stats(mean: torch.Tensor,
 
         if std_cpu is not None:
             top_std_np = std_cpu[top_idx_t].numpy()
+        
+        # Prepare sparse tick positions/labels using token ids
+        tick_step = max(1, top_k // 10)
+        tick_positions = top_idx_np[::tick_step]
+        tick_labels = [str(int(i)) for i in tick_positions]
 
         # Figure layout: if std provided, use 2x2; else use 1x2
         if std_cpu is not None:
@@ -294,20 +299,20 @@ def visualize_per_token_stats(mean: torch.Tensor,
             ax2.set_xlabel("std")
             ax2.set_ylabel("count")
 
-            ax3.bar(range(top_k), top_vals_np, color="#f28e2b")
+            # Use token ids on the x-axis
+            ax3.bar(top_idx_np, top_vals_np, color="#f28e2b")
             ax3.set_title(f"Top-{top_k} token means")
-            ax3.set_xlabel("token rank (ascending)")
+            ax3.set_xlabel("token id")
             ax3.set_ylabel("mean")
-            ax3.set_xticks(range(0, top_k, max(1, top_k // 10)))
-            sparse_labels = [str(int(i)) for i in top_idx_np[::max(1, top_k // 10)]]
-            ax3.set_xticklabels(sparse_labels, rotation=45, ha="right")
+            ax3.set_xticks(tick_positions)
+            ax3.set_xticklabels(tick_labels, rotation=45, ha="right")
 
-            ax4.bar(range(top_k), top_std_np, color="#e15759")
-            ax4.set_title(f"Top-{top_k} token std (by mean's top-K order)")
-            ax4.set_xlabel("token rank (ascending)")
+            ax4.bar(top_idx_np, top_std_np, color="#e15759")
+            ax4.set_title(f"Top-{top_k} token std")
+            ax4.set_xlabel("token id")
             ax4.set_ylabel("std")
-            ax4.set_xticks(range(0, top_k, max(1, top_k // 10)))
-            ax4.set_xticklabels(sparse_labels, rotation=45, ha="right")
+            ax4.set_xticks(tick_positions)
+            ax4.set_xticklabels(tick_labels, rotation=45, ha="right")
         else:
             fig = plt.figure(figsize=(12, 5))
             ax1 = fig.add_subplot(1, 2, 1)
@@ -317,13 +322,13 @@ def visualize_per_token_stats(mean: torch.Tensor,
             ax1.set_ylabel("count")
 
             ax2 = fig.add_subplot(1, 2, 2)
-            ax2.bar(range(top_k), top_vals_np, color="#f28e2b")
+            # Use token ids on the x-axis
+            ax2.bar(top_idx_np, top_vals_np, color="#f28e2b")
             ax2.set_title(f"Top-{top_k} token means")
-            ax2.set_xlabel("token rank (ascending)")
+            ax2.set_xlabel("token id")
             ax2.set_ylabel("mean")
-            ax2.set_xticks(range(0, top_k, max(1, top_k // 10)))
-            sparse_labels = [str(int(i)) for i in top_idx_np[::max(1, top_k // 10)]]
-            ax2.set_xticklabels(sparse_labels, rotation=45, ha="right")
+            ax2.set_xticks(tick_positions)
+            ax2.set_xticklabels(tick_labels, rotation=45, ha="right")
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         fig.tight_layout()

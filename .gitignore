@@ -193,6 +193,7 @@ AGENTS.md
 
 # Weights & Biases logs
 wandb/
+probs_stats/
 
 # Python pickle files
 *.pkl

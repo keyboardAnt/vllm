@@ -206,6 +206,24 @@ def main():
         mean, std, total = aggregate_saved_probs_stats(stats_dir)
         out_path = visualize_per_token_stats(mean, std, "probs_stats.png", top_k=50)
         print(f"Saved per-token-id stats visualization to: {out_path} (count={total})")
+
+        # Optional: log to Weights & Biases if available
+        try:
+            import wandb
+            run = wandb.init(project="vllm-bench",
+                             entity="redistributing-drafter-kernels",
+                             name=os.environ.get("WANDB_RUN_NAME", None),
+                             reinit=True)
+            wandb.log({
+                "probs_stats/count": int(total),
+                "probs_stats/mean_mean": float(mean.mean()),
+                "probs_stats/std_mean": float(std.mean()) if std is not None else 0.0,
+            })
+            if out_path.lower().endswith((".png", ".jpg", ".jpeg")):
+                wandb.log({"probs_stats/image": wandb.Image(out_path)})
+            run.finish()
+        except Exception as _wandb_e:  # noqa: BLE001
+            print(f"wandb logging skipped: {_wandb_e}")
     except Exception as e:  # noqa: BLE001
         print(f"Stats visualization skipped: {e}")
 

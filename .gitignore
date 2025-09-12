@@ -191,6 +191,9 @@ AGENTS.md
 # Results
 *.csv
 
+# Weights & Biases logs
+wandb/
+
 # Python pickle files
 *.pkl
 

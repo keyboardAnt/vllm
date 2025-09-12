@@ -653,7 +653,7 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
-        "bench": ["pandas", "datasets"],
+        "bench": ["pandas", "datasets", "matplotlib"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": [

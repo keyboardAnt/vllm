@@ -105,3 +105,130 @@ class OnlineMeanStd:
         self.M2 = None
 
 
+
+def visualize_per_token_stats(mean: torch.Tensor,
+                              std: torch.Tensor | None,
+                              output_path: str,
+                              top_k: int = 50) -> str:
+    """Visualize per-token-id mean (and optional std) statistics.
+
+    This function is intended to be called once at the end of a benchmark.
+    If matplotlib is available, it saves a figure; otherwise it falls back
+    to saving a CSV file containing the top-K tokens by mean (and std if
+    provided).
+
+    Args:
+        mean: 1D tensor of shape [vocab_size], mean per token id.
+        std: Optional 1D tensor of shape [vocab_size], std per token id.
+        output_path: Path to save the visualization (e.g., "probs_stats.png").
+        top_k: Number of top tokens to show in the bar chart.
+
+    Returns:
+        The path of the created file (PNG or CSV).
+    """
+    if mean.dim() != 1:
+        raise ValueError("visualize_per_token_stats expects mean of shape [vocab_size]")
+    if std is not None and std.dim() != 1:
+        raise ValueError("visualize_per_token_stats expects std of shape [vocab_size]")
+
+    # Move to CPU float64 for stable plotting/saving.
+    mean_cpu = mean.detach().to(dtype=torch.float64, device="cpu")
+    std_cpu = None if std is None else std.detach().to(dtype=torch.float64, device="cpu")
+    vocab_size = int(mean_cpu.numel())
+    top_k = int(max(1, min(int(top_k), vocab_size)))
+
+    # Try to plot with matplotlib; fall back to CSV if unavailable.
+    try:
+        import os
+        import importlib
+        # Dynamically import matplotlib only if available to avoid linter/env issues
+        if importlib.util.find_spec("matplotlib") is None:
+            raise ImportError("matplotlib not available")
+        matplotlib = importlib.import_module("matplotlib")
+        matplotlib.use("Agg", force=True)
+        plt = importlib.import_module("matplotlib.pyplot")
+
+        # Compute top-k by mean (keep tensors for indexing, then convert)
+        top_vals_t, top_idx_t = torch.topk(mean_cpu, k=top_k, largest=True)
+        order_t = torch.argsort(top_vals_t)  # ascending for nicer bar order
+        top_vals_np = top_vals_t[order_t].numpy()
+        top_idx_t = top_idx_t[order_t]
+        top_idx_np = top_idx_t.numpy()
+
+        if std_cpu is not None:
+            top_std_np = std_cpu[top_idx_t].numpy()
+
+        # Figure layout: if std provided, use 2x2; else use 1x2
+        if std_cpu is not None:
+            fig = plt.figure(figsize=(14, 10))
+            ax1 = fig.add_subplot(2, 2, 1)
+            ax2 = fig.add_subplot(2, 2, 2)
+            ax3 = fig.add_subplot(2, 2, 3)
+            ax4 = fig.add_subplot(2, 2, 4)
+            ax1.hist(mean_cpu.numpy(), bins=50, color="#4e79a7")
+            ax1.set_title("Per-token mean distribution")
+            ax1.set_xlabel("mean")
+            ax1.set_ylabel("count")
+
+            ax2.hist(std_cpu.numpy(), bins=50, color="#59a14f")
+            ax2.set_title("Per-token std distribution")
+            ax2.set_xlabel("std")
+            ax2.set_ylabel("count")
+
+            ax3.bar(range(top_k), top_vals_np, color="#f28e2b")
+            ax3.set_title(f"Top-{top_k} token means")
+            ax3.set_xlabel("token rank (ascending)")
+            ax3.set_ylabel("mean")
+            ax3.set_xticks(range(0, top_k, max(1, top_k // 10)))
+            sparse_labels = [str(int(i)) for i in top_idx_np[::max(1, top_k // 10)]]
+            ax3.set_xticklabels(sparse_labels, rotation=45, ha="right")
+
+            ax4.bar(range(top_k), top_std_np, color="#e15759")
+            ax4.set_title(f"Top-{top_k} token std (by mean's top-K order)")
+            ax4.set_xlabel("token rank (ascending)")
+            ax4.set_ylabel("std")
+            ax4.set_xticks(range(0, top_k, max(1, top_k // 10)))
+            ax4.set_xticklabels(sparse_labels, rotation=45, ha="right")
+        else:
+            fig = plt.figure(figsize=(12, 5))
+            ax1 = fig.add_subplot(1, 2, 1)
+            ax1.hist(mean_cpu.numpy(), bins=50, color="#4e79a7")
+            ax1.set_title("Per-token mean distribution")
+            ax1.set_xlabel("mean")
+            ax1.set_ylabel("count")
+
+            ax2 = fig.add_subplot(1, 2, 2)
+            ax2.bar(range(top_k), top_vals_np, color="#f28e2b")
+            ax2.set_title(f"Top-{top_k} token means")
+            ax2.set_xlabel("token rank (ascending)")
+            ax2.set_ylabel("mean")
+            ax2.set_xticks(range(0, top_k, max(1, top_k // 10)))
+            sparse_labels = [str(int(i)) for i in top_idx_np[::max(1, top_k // 10)]]
+            ax2.set_xticklabels(sparse_labels, rotation=45, ha="right")
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=150)
+        plt.close(fig)
+        return output_path
+    except Exception:
+        # Fallback: save CSV with top-K means (and std if available)
+        import os
+        import numpy as np
+        csv_path = output_path
+        if csv_path.lower().endswith((".png", ".jpg", ".jpeg")):
+            csv_path = os.path.splitext(csv_path)[0] + ".csv"
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        top_vals, top_idx = torch.topk(mean_cpu, k=top_k, largest=True)
+        top_idx_np = top_idx.numpy()
+        top_vals_np = top_vals.numpy()
+        if std_cpu is not None:
+            top_std_np = std_cpu[top_idx].numpy()
+            data = np.stack([top_idx_np, top_vals_np, top_std_np], axis=1)
+            header = "token_id,mean,std"
+        else:
+            data = np.stack([top_idx_np, top_vals_np], axis=1)
+            header = "token_id,mean"
+        np.savetxt(csv_path, data, delimiter=",", header=header, comments="", fmt=["%d", "%.10f"] + (["%.10f"] if std_cpu is not None else []))
+        return csv_path
+

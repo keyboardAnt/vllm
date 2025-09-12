@@ -8,7 +8,7 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.probs_stats import OnlineMeanStd
+from vllm.v1.sample.probs_stats import OnlineMeanStd, update_global_probs_stats
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
@@ -99,6 +99,7 @@ class RejectionSampler(nn.Module):
         # Update online statistics over target probability vectors/logits.
         try:
             self._probs_stats.update(target_probs)
+            update_global_probs_stats(target_probs)
         except Exception as e:
             logger.debug(f"OnlineMeanStd update skipped: {e}")
 

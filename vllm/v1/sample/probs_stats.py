@@ -105,6 +105,37 @@ class OnlineMeanStd:
         self.M2 = None
 
 
+_GLOBAL_PROBS_STATS: OnlineMeanStd | None = None
+
+
+def _get_global() -> OnlineMeanStd:
+    global _GLOBAL_PROBS_STATS
+    if _GLOBAL_PROBS_STATS is None:
+        _GLOBAL_PROBS_STATS = OnlineMeanStd()
+    return _GLOBAL_PROBS_STATS
+
+
+@torch.no_grad()
+def update_global_probs_stats(x: torch.Tensor) -> None:
+    """Update the global per-token-id statistics accumulator.
+
+    This singleton accumulator aggregates across the entire process lifetime
+    and can be queried at teardown.
+    """
+    _get_global().update(x)
+
+
+@torch.no_grad()
+def get_global_probs_stats() -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the global (mean, std) per-token-id statistics."""
+    return _get_global().get()
+
+
+@torch.no_grad()
+def reset_global_probs_stats() -> None:
+    """Reset the global accumulator."""
+    _get_global().reset()
+
 
 def visualize_per_token_stats(mean: torch.Tensor,
                               std: torch.Tensor | None,

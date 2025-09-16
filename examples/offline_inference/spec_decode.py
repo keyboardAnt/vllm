@@ -12,9 +12,8 @@ from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 from vllm.v1.sample.probs_stats import (
-    visualize_per_token_stats,
-    aggregate_saved_probs_stats,
     reset_global_probs_stats,
+    save_stream_visualizations,
     Stream,
 )
 
@@ -228,46 +227,32 @@ def main():
     # from worker processes if available.
     try:
         stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
-        mean, std, total = aggregate_saved_probs_stats(stats_dir, stream=Stream.TARGET)
-        # Generate a set of figures for various top_k values. For top_k=None,
-        # use full vocabulary size.
         top_k_values = [10, 50, 100, 32_000, 64_000, None]
-        out_paths = []
-        for k in top_k_values:
-            suffix = "all" if k is None else str(k)
-            fig_filepath = os.path.join(stats_dir, f"probs_stats_top_k_{suffix}.png")
-            k_val = int(mean.numel()) if k is None else k
-            out_paths.append(
-                visualize_per_token_stats(mean, std, fig_filepath, top_k=k_val)
-            )
-        print(
-            "Saved per-token-id stats visualizations to: "
-            + ", ".join(out_paths)
-            + f" (count={total})"
-        )
+        # One-call helper: visualize all streams, return W&B-ready mapping and list
+        wandb_mapping: dict[str, str] = {}
+        for s in (Stream.TARGET, Stream.DRAFTER, Stream.DELTA):
+            wandb_mapping.update(save_stream_visualizations(stats_dir, s, top_k_values))
+        print("Saved per-token-id stats visualizations to stats directory.")
 
         # Optional: log to Weights & Biases if available
         try:
+            # Log images using the mapping; also upload all artifacts
             import wandb
             run = wandb.init(project="vllm-bench",
                              entity="redistributing-drafter-kernels",
                              name=os.environ.get("WANDB_RUN_NAME", None),
                              reinit="finish_previous")
-            wandb.log({
-                "probs_stats/count": int(total),
-                "probs_stats/mean_mean": float(mean.mean()),
-                "probs_stats/std_mean": float(std.mean()) if std is not None else 0.0,
-            })
-            # Log all generated figures
-            images_to_log = {}
-            for p in out_paths:
-                if p.lower().endswith((".png", ".jpg", ".jpeg")):
-                    # Extract suffix from filename if present
-                    base = os.path.splitext(os.path.basename(p))[0]
-                    suffix = base.split("probs_stats_top_k_")[-1]
-                    images_to_log[f"probs_stats/image_top_k_{suffix}"] = wandb.Image(p)
-            if images_to_log:
-                wandb.log(images_to_log)
+            wandb.log({k: wandb.Image(p) for k, p in wandb_mapping.items()})
+            artifact = wandb.Artifact(
+                name=os.environ.get("WANDB_ARTIFACT_NAME", f"probs-stats-{os.path.basename(stats_dir)}"),
+                type="probs-stats",
+                metadata={"stats_dir": stats_dir},
+            )
+            for root, _dirs, files in os.walk(stats_dir):
+                for fname in files:
+                    if fname.startswith("probs_stats_") and fname.split(".")[-1].lower() in {"pt", "png", "jpg", "jpeg", "csv"}:
+                        artifact.add_file(os.path.join(root, fname))
+            run.log_artifact(artifact)
             run.finish()
         except Exception as _wandb_e:  # noqa: BLE001
             print(f"wandb logging skipped: {_wandb_e}")

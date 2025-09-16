@@ -251,14 +251,15 @@ def update_global_probs_stats(
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Global OnlineMeanStd get skipped for {_normalize_stream(stream).value}: {e}")
 
-    # Persist per-process, per-stream accumulators.
+    # Persist per-process, per-stream accumulators
     stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
     try:
         os.makedirs(stats_dir, exist_ok=True)
         streams_to_persist = [s for s, _ in streams_to_update]
         for stream in streams_to_persist:
             stats = _get_stream(stream)
-            file_path = os.path.join(stats_dir, f"probs_stats_{_normalize_stream(stream).value}_{os.getpid()}.pt")
+            stream_name = _normalize_stream(stream).value
+            file_path = os.path.join(stats_dir, f"probs_stats_{stream_name}_{os.getpid()}.pt")
             payload = {
                 "count": stats.count,
                 "mean": stats.mean.detach().to(dtype=torch.float64, device="cpu")
@@ -311,6 +312,7 @@ def aggregate_saved_probs_stats(stats_dir: str, stream: "Stream | str") -> Tuple
         (mean, std, count): Aggregated tensors (float64 CPU) and total count.
     """
     s = _normalize_stream(stream).value
+    # Flat layout (legacy and current)
     pattern = os.path.join(stats_dir, f"probs_stats_{s}_*.pt")
     files = sorted(glob.glob(pattern))
     if not files:
@@ -359,7 +361,8 @@ def aggregate_saved_probs_stats(stats_dir: str, stream: "Stream | str") -> Tuple
 def visualize_per_token_stats(mean: torch.Tensor,
                               std: torch.Tensor | None,
                               output_path: str,
-                              top_k: int = 50) -> str:
+                              top_k: int = 50,
+                              stream_name: str | None = None) -> str:
     """Visualize per-token-id mean (and optional std) statistics.
 
     This function is intended to be called once at the end of a benchmark.
@@ -404,7 +407,8 @@ def visualize_per_token_stats(mean: torch.Tensor,
         ax = fig.add_subplot(1, 1, 1)
 
         x = np.arange(mean_sorted.shape[0])
-        title = "Sorted per-token-id means"
+        title_prefix = f"[{stream_name}] " if stream_name else ""
+        title = f"{title_prefix}Sorted per-token-id means"
         if std_cpu is not None:
             std_sorted = std_cpu[sel_t].numpy()
             # Clip the vertical span to be non-negative
@@ -419,7 +423,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
                 linewidth=0.5,
                 label="±1 std (lower clipped at 0)",
             )
-            title = "Sorted per-token-id means with ±1 std deviation bars"
+            title = f"{title_prefix}Sorted per-token-id means with ±1 std deviation bars"
 
         ax.scatter(x, mean_sorted, color="navy", s=12, label="Mean", zorder=3)
         ax.set_title(title)
@@ -458,3 +462,32 @@ def visualize_per_token_stats(mean: torch.Tensor,
         np.savetxt(csv_path, data, delimiter=",", header=header, comments="", fmt=["%d", "%.10f"] + (["%.10f"] if std_cpu is not None else []))
         return csv_path
 
+
+def save_stream_visualizations(
+    stats_dir: str,
+    stream: "Stream | str",
+    top_ks: list[int | None] | None = None,
+) -> dict[str, str]:
+    """Generate per-token-id visualizations for a stream and return a W&B mapping.
+
+    Loads aggregated stats for the given stream and writes PNG (or CSV fallback)
+    files to stats_dir.
+
+    Returns a mapping suitable for W&B logging: {"probs_stats/{stream}/image_top_k_{suffix}": path}.
+    """
+    s = _normalize_stream(stream).value
+    mean, std, _ = aggregate_saved_probs_stats(stats_dir, s)
+
+    if top_ks is None:
+        # Minimal fallback: just plot the full vocabulary
+        top_ks = [-1]
+
+    mapping: dict[str, str] = {}
+    vocab_size = int(mean.numel())
+    for k in top_ks:
+        k_val = vocab_size if (k is None) or (isinstance(k, int) and (k <= 0 or k >= vocab_size)) else int(k)
+        suffix = 'all' if k_val == vocab_size else k_val
+        out_path = os.path.join(stats_dir, f"probs_stats_{s}_top_k_{suffix}.png")
+        created_path = visualize_per_token_stats(mean, std, out_path, top_k=k_val, stream_name=s)
+        mapping[f"probs_stats/{s}/image_top_k_{suffix}"] = created_path
+    return mapping

@@ -13,6 +13,7 @@ from vllm.v1.sample.probs_stats import (
     visualize_per_token_stats,
     aggregate_saved_probs_stats,
     reset_global_probs_stats,
+    Stream,
 )
 
 try:
@@ -220,7 +221,7 @@ def main():
     # from worker processes if available.
     try:
         stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
-        mean, std, total = aggregate_saved_probs_stats(stats_dir)
+        mean, std, total = aggregate_saved_probs_stats(stats_dir, stream=Stream.TARGET)
         # Generate a set of figures for various top_k values. For top_k=None,
         # use full vocabulary size.
         top_k_values = [10, 50, 100, 32_000, 64_000, None]

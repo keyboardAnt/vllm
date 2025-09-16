@@ -101,7 +101,7 @@ class RejectionSampler(nn.Module):
             logger.info(f"{sampling_metadata.all_greedy=}, hence applying softmax to target_logits to get probs (assuming temperature is 1.0)")
             target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
 
-        update_global_probs_stats(target_probs)
+        update_global_probs_stats(target_probs, draft_probs)
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,

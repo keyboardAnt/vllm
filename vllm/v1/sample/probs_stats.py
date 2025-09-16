@@ -1,19 +1,26 @@
-"""Utilities for online statistics over probability vectors.
+"""Utilities for online statistics over vector features.
 
 Implements numerically stable online mean and standard deviation using
 Welford's algorithm, with support for batched updates.
 
+Typical LLM use-cases tracked by this module include per-feature statistics
+for:
+- target probabilities ("target" stream)
+- drafter probabilities ("drafter" stream)
+- their difference, target minus drafter ("delta" stream)
+
 Notes
 -----
-- The feature dimension corresponds to vocabulary token ids (per-token-id
-  statistics). When inputs have shape [N, D], D should be the vocabulary
-  size, and each column aggregates statistics for a specific token id across
-  all observations (rows).
+- The feature dimension corresponds to generic features, commonly vocabulary
+  token ids (per-token-id statistics). When inputs have shape [N, D], D should
+  be the feature size (e.g., vocab size), and each column aggregates
+  statistics for a specific feature across observations (rows).
 """
 
 from __future__ import annotations
 
 from typing import Tuple
+from enum import Enum
 
 import os
 import glob
@@ -110,97 +117,159 @@ class OnlineMeanStd:
 
 logger = init_logger(__name__)
 
-_GLOBAL_PROBS_STATS: OnlineMeanStd | None = None
+# Per-stream global accumulators.
+_GLOBAL_STREAM_STATS: dict[str, OnlineMeanStd] = {}
 
 
-def _get_global() -> OnlineMeanStd:
-    global _GLOBAL_PROBS_STATS
-    if _GLOBAL_PROBS_STATS is None:
-        _GLOBAL_PROBS_STATS = OnlineMeanStd()
-    return _GLOBAL_PROBS_STATS
+class Stream(str, Enum):
+    TARGET = "target"
+    DRAFTER = "drafter"
+    DELTA = "delta"
+
+
+ALL_STREAMS: tuple[Stream, ...] = tuple(Stream)
+
+
+def _normalize_stream(stream: "Stream | str") -> Stream:
+    if isinstance(stream, Stream):
+        return stream
+    return Stream(stream)
+
+
+def _get_stream(stream: "Stream | str") -> OnlineMeanStd:
+    s = _normalize_stream(stream).value
+    stats = _GLOBAL_STREAM_STATS.get(s)
+    if stats is None:
+        stats = OnlineMeanStd()
+        _GLOBAL_STREAM_STATS[s] = stats
+    return stats
 
 
 @torch.no_grad()
-def update_global_probs_stats(x: torch.Tensor) -> None:
-    """Update the global per-token-id statistics accumulator.
+def update_global_probs_stats(
+    probs_target: torch.Tensor,
+    probs_drafter: torch.Tensor | None,
+) -> None:
+    """Update per-stream global statistics for target, drafter, and delta.
 
-    This singleton accumulator aggregates across the entire process lifetime
-    and can be queried at teardown.
+    Args:
+        probs_target: Tensor of shape [N, D]. Rows are probability vectors for
+            the target model. Expected to be in [0, 1] with row sums ≈ 1.
+        probs_drafter: Tensor of shape [N, D]. Rows are probability vectors for
+            the drafter model. Expected to be in [0, 1] with row sums ≈ 1.
     """
-    stats = _get_global()
+    assert probs_target.ndim == 2, "probs_target must be 2D [N, D]"
+    if probs_drafter is not None:
+        assert probs_drafter.ndim == 2, "probs_drafter must be 2D [N, D]"
+        assert probs_target.shape == probs_drafter.shape, "shapes must match"
 
-    # Log stats of x
-    logger.info(f"{x.shape=}") # [batch_size, seq_len]
-    assert x.ndim == 2
-    logger.info(f"{x.mean(dim=-1).mean()=}")
-    logger.info(f"{x.std(dim=-1).mean()=}")
-    logger.info(f"{x.min()=}")
-    assert (x >= 0).all()
-    logger.info(f"{x.max()=}")
-    assert (x <= 1).all()
-    row_sums = x.sum(dim=-1)
-    assert torch.allclose(row_sums, torch.ones_like(row_sums), rtol=1e-4, atol=1e-6)
+    # Validate target
+    logger.info(f"{probs_target.shape=}")
+    assert (probs_target >= 0).all() and (probs_target <= 1).all()
+    target_row_sums = probs_target.sum(dim=-1)
+    assert torch.allclose(
+        target_row_sums, torch.ones_like(target_row_sums), rtol=1e-4, atol=1e-6
+    )
 
-    stats.update(x)
-    # Log a brief summary of current global stats.
-    try:
-        mean, std = stats.get()
-        logger.info(
-            "Target probs stats (global): count=%d, dim=%d, mean_mean=%.6f, std_mean=%.6f",
-            stats.count,
-            mean.numel(),
-            float(mean.mean()),
-            float(std.mean()),
+    streams_to_update: list[tuple[Stream, torch.Tensor]] = [(Stream.TARGET, probs_target)]
+    if probs_drafter is not None:
+        # Validate drafter
+        logger.info(f"{probs_drafter.shape=}")
+        assert (probs_drafter >= 0).all() and (probs_drafter <= 1).all()
+        drafter_row_sums = probs_drafter.sum(dim=-1)
+        assert torch.allclose(
+            drafter_row_sums, torch.ones_like(drafter_row_sums), rtol=1e-4, atol=1e-6
         )
-    except Exception as e:  # noqa: BLE001
-        # No observations yet or intermediate state; skip quietly.
-        logger.debug(f"Global OnlineMeanStd get skipped: {e}")
 
-    # Persist the current accumulators to a per-process file. If the output
-    # directory is not provided via env, default to "probs_stats" in CWD.
+        # Compute delta and validate its row sums ≈ 0
+        delta = probs_target - probs_drafter
+        delta_row_sums = delta.sum(dim=-1)
+        assert torch.allclose(
+            delta_row_sums, torch.zeros_like(delta_row_sums), rtol=1e-4, atol=1e-6
+        )
+        streams_to_update.extend([(Stream.DRAFTER, probs_drafter), (Stream.DELTA, delta)])
+    else:
+        logger.info("probs_drafter=None; updating only the 'target' stream")
+
+    # Update per-stream accumulators
+    for stream, x in streams_to_update:
+        stats = _get_stream(stream)
+        stats.update(x)
+        try:
+            mean, std = stats.get()
+            logger.info(
+                "%s stats (global): count=%d, dim=%d, mean_mean=%.6f, std_mean=%.6f",
+                _normalize_stream(stream).value,
+                stats.count,
+                mean.numel(),
+                float(mean.mean()),
+                float(std.mean()),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Global OnlineMeanStd get skipped for {_normalize_stream(stream).value}: {e}")
+
+    # Persist per-process, per-stream accumulators.
     stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
     try:
         os.makedirs(stats_dir, exist_ok=True)
-        file_path = os.path.join(stats_dir, f"probs_stats_{os.getpid()}.pt")
-        # Save CPU float64 for numerical stability when aggregating.
-        payload = {
-            "count": stats.count,
-            "mean": stats.mean.detach().to(dtype=torch.float64, device="cpu")
-            if stats.mean is not None else None,
-            "M2": stats.M2.detach().to(dtype=torch.float64, device="cpu")
-            if stats.M2 is not None else None,
-        }
-        torch.save(payload, file_path)
+        streams_to_persist = [s for s, _ in streams_to_update]
+        for stream in streams_to_persist:
+            stats = _get_stream(stream)
+            file_path = os.path.join(stats_dir, f"probs_stats_{_normalize_stream(stream).value}_{os.getpid()}.pt")
+            payload = {
+                "count": stats.count,
+                "mean": stats.mean.detach().to(dtype=torch.float64, device="cpu")
+                if stats.mean is not None else None,
+                "M2": stats.M2.detach().to(dtype=torch.float64, device="cpu")
+                if stats.M2 is not None else None,
+            }
+            torch.save(payload, file_path)
     except Exception as save_e:  # noqa: BLE001
         logger.debug(f"Failed to persist global probs stats: {save_e}")
-    
+@torch.no_grad()
+def get_global_probs_stats(stream: "Stream | str") -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the global (mean, std) per-feature statistics for a stream.
+
+    Args:
+        stream: One of {"target", "drafter", "delta"}.
+    """
+    return _get_stream(stream).get()
 
 
 @torch.no_grad()
-def get_global_probs_stats() -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the global (mean, std) per-token-id statistics."""
-    return _get_global().get()
+def reset_global_probs_stats(stream: "Stream | str | None" = None) -> None:
+    """Reset the global accumulators.
+
+    Args:
+        stream: If provided, reset only the specified stream. If None, reset
+            all streams.
+    """
+    if stream is None:
+        for s in list(_GLOBAL_STREAM_STATS.keys()):
+            _GLOBAL_STREAM_STATS[s].reset()
+    else:
+        _get_stream(stream).reset()
 
 
 @torch.no_grad()
-def reset_global_probs_stats() -> None:
-    """Reset the global accumulator."""
-    _get_global().reset()
+def aggregate_saved_probs_stats(stats_dir: str, stream: "Stream | str") -> Tuple[torch.Tensor, torch.Tensor, int]:
+    """Aggregate per-process saved stats into global mean/std for a stream.
 
+    The directory should contain files saved by this module with names like
+    "probs_stats_{stream}_{pid}.pt" that include keys: count, mean, M2.
 
-@torch.no_grad()
-def aggregate_saved_probs_stats(stats_dir: str) -> Tuple[torch.Tensor, torch.Tensor, int]:
-    """Aggregate per-process saved stats into global mean/std.
-
-    The directory should contain files saved by update_global_probs_stats with
-    names like "probs_stats_<pid>.pt" that include keys: count, mean, M2.
+    Args:
+        stats_dir: Directory containing saved per-process stats files.
+        stream: One of {"target", "drafter", "delta"}.
 
     Returns:
         (mean, std, count): Aggregated tensors (float64 CPU) and total count.
     """
-    files = sorted(glob.glob(os.path.join(stats_dir, "probs_stats_*.pt")))
+    s = _normalize_stream(stream).value
+    pattern = os.path.join(stats_dir, f"probs_stats_{s}_*.pt")
+    files = sorted(glob.glob(pattern))
     if not files:
-        raise ValueError(f"No stats files found in {stats_dir}")
+        raise ValueError(f"No stats files found for stream '{s}' in {stats_dir}")
 
     total_count = 0
     agg_mean = None
@@ -246,7 +315,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
                               std: torch.Tensor | None,
                               output_path: str,
                               top_k: int = 50) -> str:
-    """Visualize per-token-id mean (and optional std) statistics.
+    """Visualize per-feature mean (and optional std) statistics.
 
     This function is intended to be called once at the end of a benchmark.
     If matplotlib is available, it saves a figure; otherwise it falls back
@@ -254,18 +323,18 @@ def visualize_per_token_stats(mean: torch.Tensor,
     provided).
 
     Args:
-        mean: 1D tensor of shape [vocab_size], mean per token id.
-        std: Optional 1D tensor of shape [vocab_size], std per token id.
+        mean: 1D tensor of shape [feature_size], mean per feature (e.g., token id).
+        std: Optional 1D tensor of shape [feature_size], std per feature.
         output_path: Path to save the visualization (e.g., "probs_stats.png").
-        top_k: Number of top tokens to show in the bar chart.
+        top_k: Number of top features to show in the chart.
 
     Returns:
         The path of the created file (PNG or CSV).
     """
     if mean.dim() != 1:
-        raise ValueError("visualize_per_token_stats expects mean of shape [vocab_size]")
+        raise ValueError("visualize_per_token_stats expects mean of shape [feature_size]")
     if std is not None and std.dim() != 1:
-        raise ValueError("visualize_per_token_stats expects std of shape [vocab_size]")
+        raise ValueError("visualize_per_token_stats expects std of shape [feature_size]")
 
     # Move to CPU float64 for stable plotting/saving.
     mean_cpu = mean.detach().to(dtype=torch.float64, device="cpu")
@@ -281,7 +350,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
         import matplotlib.pyplot as plt
         import numpy as np
 
-        # Sort tokens by descending mean probability and select top_k
+        # Sort features by descending mean and select top_k
         order_t = torch.argsort(mean_cpu, descending=True)
         sel_t = order_t[:top_k]
         mean_sorted = mean_cpu[sel_t].numpy()
@@ -290,7 +359,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
         ax = fig.add_subplot(1, 1, 1)
 
         x = np.arange(mean_sorted.shape[0])
-        title = "Sorted per-token probabilities"
+        title = "Sorted per-feature means"
         if std_cpu is not None:
             std_sorted = std_cpu[sel_t].numpy()
             # Clip the vertical span to be non-negative
@@ -305,15 +374,15 @@ def visualize_per_token_stats(mean: torch.Tensor,
                 linewidth=0.5,
                 label="±1 std (lower clipped at 0)",
             )
-            title = "Sorted per-token probabilities with ±1 std deviation bars"
+            title = "Sorted per-feature means with ±1 std deviation bars"
 
-        ax.scatter(x, mean_sorted, color="navy", s=12, label="Mean probability", zorder=3)
+        ax.scatter(x, mean_sorted, color="navy", s=12, label="Mean", zorder=3)
         ax.set_title(title)
         if std_cpu is not None:
             ax.legend()
 
-        ax.set_xlabel("Token (sorted by mean probability)")
-        ax.set_ylabel("Probability")
+        ax.set_xlabel("Feature (sorted by mean)")
+        ax.set_ylabel("Value")
         ax.grid(True, alpha=0.3)
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)

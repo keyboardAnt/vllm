@@ -204,7 +204,8 @@ def main():
         import os
         stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
         mean, std, total = aggregate_saved_probs_stats(stats_dir)
-        out_path = visualize_per_token_stats(mean, std, "probs_stats.png", top_k=50)
+        fig_filepath = os.path.join(stats_dir, "probs_stats.png")
+        out_path = visualize_per_token_stats(mean, std, fig_filepath, top_k=50)
         print(f"Saved per-token-id stats visualization to: {out_path} (count={total})")
 
         # Optional: log to Weights & Biases if available

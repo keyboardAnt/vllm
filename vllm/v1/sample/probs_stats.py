@@ -288,6 +288,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
         ax = fig.add_subplot(1, 1, 1)
 
         x = np.arange(mean_sorted.shape[0])
+        title = "Sorted per-token probabilities"
         if std_cpu is not None:
             std_sorted = std_cpu[sel_t].numpy()
             # Clip the vertical span to be non-negative
@@ -302,12 +303,12 @@ def visualize_per_token_stats(mean: torch.Tensor,
                 linewidth=0.5,
                 label="±1 std (lower clipped at 0)",
             )
-            ax.plot(x, mean_sorted, color="navy", linewidth=1.2, label="Mean probability")
-            ax.set_title("Sorted per-token probabilities with ±1 std deviation bars")
+            title = "Sorted per-token probabilities with ±1 std deviation bars"
+
+        ax.scatter(x, mean_sorted, color="navy", s=12, label="Mean probability", zorder=3)
+        ax.set_title(title)
+        if std_cpu is not None:
             ax.legend()
-        else:
-            ax.plot(x, mean_sorted, color="navy", linewidth=1.2, label="Mean probability")
-            ax.set_title("Sorted per-token probabilities")
 
         ax.set_xlabel("Token (sorted by mean probability)")
         ax.set_ylabel("Probability")

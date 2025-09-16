@@ -221,9 +221,22 @@ def main():
     try:
         stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
         mean, std, total = aggregate_saved_probs_stats(stats_dir)
-        fig_filepath = os.path.join(stats_dir, "probs_stats.png")
-        out_path = visualize_per_token_stats(mean, std, fig_filepath, top_k=50)
-        print(f"Saved per-token-id stats visualization to: {out_path} (count={total})")
+        # Generate a set of figures for various top_k values. For top_k=None,
+        # use full vocabulary size.
+        top_k_values = [10, 50, 100, 32_000, 64_000, None]
+        out_paths = []
+        for k in top_k_values:
+            suffix = "all" if k is None else str(k)
+            fig_filepath = os.path.join(stats_dir, f"probs_stats_top_k_{suffix}.png")
+            k_val = int(mean.numel()) if k is None else k
+            out_paths.append(
+                visualize_per_token_stats(mean, std, fig_filepath, top_k=k_val)
+            )
+        print(
+            "Saved per-token-id stats visualizations to: "
+            + ", ".join(out_paths)
+            + f" (count={total})"
+        )
 
         # Optional: log to Weights & Biases if available
         try:
@@ -231,14 +244,22 @@ def main():
             run = wandb.init(project="vllm-bench",
                              entity="redistributing-drafter-kernels",
                              name=os.environ.get("WANDB_RUN_NAME", None),
-                             reinit=True)
+                             reinit="finish_previous")
             wandb.log({
                 "probs_stats/count": int(total),
                 "probs_stats/mean_mean": float(mean.mean()),
                 "probs_stats/std_mean": float(std.mean()) if std is not None else 0.0,
             })
-            if out_path.lower().endswith((".png", ".jpg", ".jpeg")):
-                wandb.log({"probs_stats/image": wandb.Image(out_path)})
+            # Log all generated figures
+            images_to_log = {}
+            for p in out_paths:
+                if p.lower().endswith((".png", ".jpg", ".jpeg")):
+                    # Extract suffix from filename if present
+                    base = os.path.splitext(os.path.basename(p))[0]
+                    suffix = base.split("probs_stats_top_k_")[-1]
+                    images_to_log[f"probs_stats/image_top_k_{suffix}"] = wandb.Image(p)
+            if images_to_log:
+                wandb.log(images_to_log)
             run.finish()
         except Exception as _wandb_e:  # noqa: BLE001
             print(f"wandb logging skipped: {_wandb_e}")

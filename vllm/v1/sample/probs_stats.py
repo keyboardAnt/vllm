@@ -128,6 +128,14 @@ def update_global_probs_stats(x: torch.Tensor) -> None:
     and can be queried at teardown.
     """
     stats = _get_global()
+
+    # Log stats of x
+    logger.info(f"{x.shape=}")
+    logger.info(f"{x.mean(dim=-1).mean()=}")
+    logger.info(f"{x.std(dim=-1).mean()=}")
+    logger.info(f"{x.min()=}")
+    logger.info(f"{x.max()=}")
+
     stats.update(x)
     # Log a brief summary of current global stats.
     try:

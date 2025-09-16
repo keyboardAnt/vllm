@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
+
 import os
 import time
 from transformers import AutoTokenizer
@@ -77,6 +79,10 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument(
+        "--enable-draft-probs", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument("--request-id-prefix", type=str, default="")
     return parser.parse_args()
 
 
@@ -133,6 +139,7 @@ def main():
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
+            "enable_draft_probs": args.enable_draft_probs,
         }
     elif args.method == "ngram":
         speculative_config = {

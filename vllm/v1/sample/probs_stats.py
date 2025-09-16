@@ -221,11 +221,12 @@ def update_global_probs_stats(
     if probs_drafter is not None:
         logger.info(f"{probs_drafter.shape=}")
         if is_valid_probs(probs_drafter, Stream.DRAFTER) and is_valid_probs(probs_target, Stream.TARGET):
+            # Delta rows should sum to ~0. Use float64 and a slightly relaxed atol
+            # to account for accumulation and prior tolerances on each stream.
             delta = probs_target - probs_drafter
-            # Delta rows should sum to ~0
-            delta_row_sums = delta.sum(dim=-1)
+            delta_row_sums = delta.to(torch.float64).sum(dim=-1)
             assert torch.allclose(
-                delta_row_sums, torch.zeros_like(delta_row_sums), rtol=1e-4, atol=1e-6
+                delta_row_sums, torch.zeros_like(delta_row_sums), rtol=0, atol=3e-4
             )
             streams_to_update.extend([(Stream.DRAFTER, probs_drafter), (Stream.DELTA, delta)])
         else:
@@ -268,6 +269,8 @@ def update_global_probs_stats(
             torch.save(payload, file_path)
     except Exception as save_e:  # noqa: BLE001
         logger.debug(f"Failed to persist global probs stats: {save_e}")
+
+
 @torch.no_grad()
 def get_global_probs_stats(stream: "Stream | str") -> tuple[torch.Tensor, torch.Tensor]:
     """Return the global (mean, std) per-token-id statistics for a stream.

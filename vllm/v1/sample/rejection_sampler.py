@@ -97,7 +97,13 @@ class RejectionSampler(nn.Module):
         )
         # Update global online statistics over target probability vectors.
         try:
-            update_global_probs_stats(target_probs)
+            # For greedy runs, compute_probs returns logits; convert to probs
+            # only for stats to ensure non-negative means that sum to ~1.
+            stats_input = (
+                target_logits.softmax(dim=-1, dtype=torch.float32)
+                if sampling_metadata.all_greedy else target_probs
+            )
+            update_global_probs_stats(stats_input)
         except Exception as e:
             logger.debug(f"Global OnlineMeanStd update skipped: {e}")
 

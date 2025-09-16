@@ -3,7 +3,7 @@
 Implements numerically stable online mean and standard deviation using
 Welford's algorithm, with support for batched updates.
 
-Typical LLM use-cases tracked by this module include per-feature statistics
+Typical LLM use-cases tracked by this module include per-token-id statistics
 for:
 - target probabilities ("target" stream)
 - drafter probabilities ("drafter" stream)
@@ -11,10 +11,10 @@ for:
 
 Notes
 -----
-- The feature dimension corresponds to generic features, commonly vocabulary
+- The feature dimension corresponds to vocabulary token ids, commonly the
   token ids (per-token-id statistics). When inputs have shape [N, D], D should
   be the feature size (e.g., vocab size), and each column aggregates
-  statistics for a specific feature across observations (rows).
+  statistics for a specific token id across observations (rows).
 """
 
 from __future__ import annotations
@@ -228,7 +228,7 @@ def update_global_probs_stats(
         logger.debug(f"Failed to persist global probs stats: {save_e}")
 @torch.no_grad()
 def get_global_probs_stats(stream: "Stream | str") -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the global (mean, std) per-feature statistics for a stream.
+    """Return the global (mean, std) per-token-id statistics for a stream.
 
     Args:
         stream: One of {"target", "drafter", "delta"}.
@@ -315,7 +315,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
                               std: torch.Tensor | None,
                               output_path: str,
                               top_k: int = 50) -> str:
-    """Visualize per-feature mean (and optional std) statistics.
+    """Visualize per-token-id mean (and optional std) statistics.
 
     This function is intended to be called once at the end of a benchmark.
     If matplotlib is available, it saves a figure; otherwise it falls back
@@ -323,18 +323,18 @@ def visualize_per_token_stats(mean: torch.Tensor,
     provided).
 
     Args:
-        mean: 1D tensor of shape [feature_size], mean per feature (e.g., token id).
-        std: Optional 1D tensor of shape [feature_size], std per feature.
+        mean: 1D tensor of shape [feature_size], mean per token id.
+        std: Optional 1D tensor of shape [feature_size], std per token id.
         output_path: Path to save the visualization (e.g., "probs_stats.png").
-        top_k: Number of top features to show in the chart.
+        top_k: Number of top token ids to show in the chart.
 
     Returns:
         The path of the created file (PNG or CSV).
     """
     if mean.dim() != 1:
-        raise ValueError("visualize_per_token_stats expects mean of shape [feature_size]")
+        raise ValueError("visualize_per_token_stats expects mean of shape [token_id_size]")
     if std is not None and std.dim() != 1:
-        raise ValueError("visualize_per_token_stats expects std of shape [feature_size]")
+        raise ValueError("visualize_per_token_stats expects std of shape [token_id_size]")
 
     # Move to CPU float64 for stable plotting/saving.
     mean_cpu = mean.detach().to(dtype=torch.float64, device="cpu")
@@ -359,7 +359,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
         ax = fig.add_subplot(1, 1, 1)
 
         x = np.arange(mean_sorted.shape[0])
-        title = "Sorted per-feature means"
+        title = "Sorted per-token-id means"
         if std_cpu is not None:
             std_sorted = std_cpu[sel_t].numpy()
             # Clip the vertical span to be non-negative
@@ -374,7 +374,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
                 linewidth=0.5,
                 label="±1 std (lower clipped at 0)",
             )
-            title = "Sorted per-feature means with ±1 std deviation bars"
+            title = "Sorted per-token-id means with ±1 std deviation bars"
 
         ax.scatter(x, mean_sorted, color="navy", s=12, label="Mean", zorder=3)
         ax.set_title(title)

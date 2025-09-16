@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import time
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -10,6 +12,7 @@ from vllm.v1.metrics.reader import Counter, Vector
 from vllm.v1.sample.probs_stats import (
     visualize_per_token_stats,
     aggregate_saved_probs_stats,
+    reset_global_probs_stats,
 )
 
 try:
@@ -79,6 +82,21 @@ def parse_args():
 def main():
     args = parse_args()
     args.endpoint_type = "openai-chat"
+
+    # Reset global per-token-id probability stats at startup to avoid
+    # aggregating from previous runs in this process.
+    reset_global_probs_stats()
+
+    # Create a unique per-run stats directory and set env so all workers use it.
+    # If VLLM_PROBS_STATS_DIR is provided, treat it as the base and append a run id.
+    base_stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
+    run_id = (
+        os.environ.get("WANDB_RUN_ID")
+        or os.environ.get("RUN_ID")
+        or f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+    )
+    per_run_stats_dir = os.path.join(base_stats_dir, run_id)
+    os.environ["VLLM_PROBS_STATS_DIR"] = per_run_stats_dir
 
     model_dir = args.model_dir
     if args.model_dir is None:
@@ -201,7 +219,6 @@ def main():
     # Visualize per-token-id statistics at end of benchmark using saved files
     # from worker processes if available.
     try:
-        import os
         stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
         mean, std, total = aggregate_saved_probs_stats(stats_dir)
         fig_filepath = os.path.join(stats_dir, "probs_stats.png")

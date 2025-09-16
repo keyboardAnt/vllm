@@ -130,14 +130,16 @@ def update_global_probs_stats(x: torch.Tensor) -> None:
     stats = _get_global()
 
     # Log stats of x
-    logger.info(f"{x.shape=}")
+    logger.info(f"{x.shape=}") # [batch_size, seq_len]
+    assert x.ndim == 2
     logger.info(f"{x.mean(dim=-1).mean()=}")
     logger.info(f"{x.std(dim=-1).mean()=}")
     logger.info(f"{x.min()=}")
-    assert x.min() >= 0.0
+    assert (x >= 0).all()
     logger.info(f"{x.max()=}")
-    assert x.max() <= 1.0
-    assert torch.allclose(x.sum(dim=-1), 1.0)
+    assert (x <= 1).all()
+    row_sums = x.sum(dim=-1)
+    assert torch.allclose(row_sums, torch.ones_like(row_sums), rtol=1e-4, atol=1e-6)
 
     stats.update(x)
     # Log a brief summary of current global stats.

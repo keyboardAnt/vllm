@@ -120,6 +120,10 @@ logger = init_logger(__name__)
 # Per-stream global accumulators.
 _GLOBAL_STREAM_STATS: dict[str, OnlineMeanStd] = {}
 
+# Sticky validity flags per stream. Once a stream is observed with valid
+# probability distributions, subsequent invalid observations will raise.
+_PROBS_VALID_SEEN_TRUE: dict[str, bool] = {}
+
 
 class Stream(str, Enum):
     TARGET = "target"
@@ -146,6 +150,47 @@ def _get_stream(stream: "Stream | str") -> OnlineMeanStd:
 
 
 @torch.no_grad()
+def is_valid_probs(
+    probs: torch.Tensor,
+    stream: "Stream | str",
+) -> bool:
+    """Check whether probs is a valid probability matrix for a given stream.
+
+    Valid means:
+    - 2D tensor [N, D]
+    - all finite
+    - values in [0, 1]
+    - row sums ≈ 1
+
+    Sticky success: once this returns True for a stream, it must keep returning
+    True for that stream. If a later call returns invalid, an exception is
+    raised.
+    """
+    s = _normalize_stream(stream).value
+    if probs.ndim != 2:
+        raise ValueError("probs must be 2D [N, D]")
+
+    is_finite = bool(torch.isfinite(probs).all().item())
+    in_range = bool(((probs >= 0).all() and (probs <= 1).all()).item())
+    row_sums = probs.sum(dim=-1)
+    sums_close = bool(
+        torch.allclose(row_sums, torch.ones_like(row_sums), rtol=1e-4, atol=1e-6)
+    )
+
+    valid = is_finite and in_range and sums_close
+
+    seen_true = _PROBS_VALID_SEEN_TRUE.get(s, False)
+    if seen_true and not valid:
+        raise RuntimeError(
+            f"Probability matrix for stream '{s}' became invalid after previously being valid."
+        )
+    if valid and not seen_true:
+        _PROBS_VALID_SEEN_TRUE[s] = True
+
+    return valid
+
+
+@torch.no_grad()
 def update_global_probs_stats(
     probs_target: torch.Tensor,
     probs_drafter: torch.Tensor | None,
@@ -163,31 +208,28 @@ def update_global_probs_stats(
         assert probs_drafter.ndim == 2, "probs_drafter must be 2D [N, D]"
         assert probs_target.shape == probs_drafter.shape, "shapes must match"
 
-    # Validate target
+    streams_to_update: list[tuple[Stream, torch.Tensor]] = []
+
+    # Validate and enqueue target
     logger.info(f"{probs_target.shape=}")
-    assert (probs_target >= 0).all() and (probs_target <= 1).all()
-    target_row_sums = probs_target.sum(dim=-1)
-    assert torch.allclose(
-        target_row_sums, torch.ones_like(target_row_sums), rtol=1e-4, atol=1e-6
-    )
+    if is_valid_probs(probs_target, Stream.TARGET):
+        streams_to_update.append((Stream.TARGET, probs_target))
+    else:
+        logger.debug("Skipping 'target' stream stats update: invalid probabilities (likely warmup)")
 
-    streams_to_update: list[tuple[Stream, torch.Tensor]] = [(Stream.TARGET, probs_target)]
+    # Validate drafter (if provided) and delta only if both are valid
     if probs_drafter is not None:
-        # Validate drafter
         logger.info(f"{probs_drafter.shape=}")
-        assert (probs_drafter >= 0).all() and (probs_drafter <= 1).all()
-        drafter_row_sums = probs_drafter.sum(dim=-1)
-        assert torch.allclose(
-            drafter_row_sums, torch.ones_like(drafter_row_sums), rtol=1e-4, atol=1e-6
-        )
-
-        # Compute delta and validate its row sums ≈ 0
-        delta = probs_target - probs_drafter
-        delta_row_sums = delta.sum(dim=-1)
-        assert torch.allclose(
-            delta_row_sums, torch.zeros_like(delta_row_sums), rtol=1e-4, atol=1e-6
-        )
-        streams_to_update.extend([(Stream.DRAFTER, probs_drafter), (Stream.DELTA, delta)])
+        if is_valid_probs(probs_drafter, Stream.DRAFTER) and is_valid_probs(probs_target, Stream.TARGET):
+            delta = probs_target - probs_drafter
+            # Delta rows should sum to ~0
+            delta_row_sums = delta.sum(dim=-1)
+            assert torch.allclose(
+                delta_row_sums, torch.zeros_like(delta_row_sums), rtol=1e-4, atol=1e-6
+            )
+            streams_to_update.extend([(Stream.DRAFTER, probs_drafter), (Stream.DELTA, delta)])
+        else:
+            logger.debug("Skipping 'drafter' and 'delta' stats update: invalid probabilities (likely warmup)")
     else:
         logger.info("probs_drafter=None; updating only the 'target' stream")
 

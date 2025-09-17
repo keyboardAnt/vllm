@@ -362,7 +362,9 @@ def visualize_per_token_stats(mean: torch.Tensor,
                               std: torch.Tensor | None,
                               output_path: str,
                               top_k: int = 50,
-                              stream_name: str | None = None) -> str:
+                              stream_name: str | None = None,
+                              order_indices: torch.Tensor | None = None,
+                              sort_info: str | None = None) -> str:
     """Visualize per-token-id mean (and optional std) statistics.
 
     This function is intended to be called once at the end of a benchmark.
@@ -398,8 +400,13 @@ def visualize_per_token_stats(mean: torch.Tensor,
         import matplotlib.pyplot as plt
         import numpy as np
 
-        # Sort features by descending mean and select top_k
-        order_t = torch.argsort(mean_cpu, descending=True)
+        # Determine the ordering of token ids used for visualization.
+        if order_indices is None:
+            order_t = torch.argsort(mean_cpu, descending=True)
+        else:
+            # Use provided global order (already CPU-compatible or convertible)
+            order_t = order_indices.detach().to(dtype=torch.long, device="cpu")
+        # Select top_k entries according to the order
         sel_t = order_t[:top_k]
         mean_sorted = mean_cpu[sel_t].numpy()
 
@@ -408,7 +415,8 @@ def visualize_per_token_stats(mean: torch.Tensor,
 
         x = np.arange(mean_sorted.shape[0])
         title_prefix = f"[{stream_name}] " if stream_name else ""
-        title = f"{title_prefix}Sorted per-token-id means"
+        sort_suffix = f" (order: {sort_info})" if sort_info else ""
+        title = f"{title_prefix}Sorted per-token-id means{sort_suffix}"
         if std_cpu is not None:
             std_sorted = std_cpu[sel_t].numpy()
             # Clip the vertical span to be non-negative
@@ -423,7 +431,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
                 linewidth=0.5,
                 label="±1 std (lower clipped at 0)",
             )
-            title = f"{title_prefix}Sorted per-token-id means with ±1 std deviation bars"
+            title = f"{title_prefix}Sorted per-token-id means with ±1 std deviation bars{sort_suffix}"
 
         ax.scatter(x, mean_sorted, color="navy", s=12, label="Mean", zorder=3)
         ax.set_title(title)
@@ -448,7 +456,10 @@ def visualize_per_token_stats(mean: torch.Tensor,
             csv_path = os.path.splitext(csv_path)[0] + ".csv"
         os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
         # Sort and take top_k to mirror the visualization
-        order_t = torch.argsort(mean_cpu, descending=True)
+        if order_indices is None:
+            order_t = torch.argsort(mean_cpu, descending=True)
+        else:
+            order_t = order_indices.detach().to(dtype=torch.long, device="cpu")
         sel_t = order_t[:top_k]
         top_idx_np = sel_t.numpy()
         top_vals_np = mean_cpu[sel_t].numpy()
@@ -467,6 +478,7 @@ def save_stream_visualizations(
     stats_dir: str,
     stream: "Stream | str",
     top_ks: list[int | None] | None = None,
+    sort_scores_path: str | None = None,
 ) -> dict[str, str]:
     """Generate per-token-id visualizations for a stream and return a W&B mapping.
 
@@ -478,6 +490,32 @@ def save_stream_visualizations(
     s = _normalize_stream(stream).value
     mean, std, _ = aggregate_saved_probs_stats(stats_dir, s)
 
+    # Establish a global order using either external sort scores or target means.
+    order_indices: torch.Tensor | None = None
+    sort_info: str | None = None
+    if sort_scores_path is not None:
+        try:
+            scores = torch.load(sort_scores_path, map_location="cpu")
+            if isinstance(scores, dict) and "tensor" in scores:
+                scores = scores["tensor"]
+            scores = torch.as_tensor(scores, dtype=torch.float64, device="cpu")
+            if scores.dim() != 1 or int(scores.numel()) != int(mean.numel()):
+                raise ValueError("Sorting scores must be a 1D tensor with length == vocab size")
+            order_indices = torch.argsort(scores, descending=True)
+            sort_info = f"external:{os.path.basename(sort_scores_path)}"
+            logger.info("Using external sorting scores at %s", sort_scores_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to load sort scores from %s (%s). Falling back to target means.", sort_scores_path, e)
+            sort_scores_path = None
+            order_indices = None
+
+    if order_indices is None:
+        # Default: use target stream means to define the order for all streams
+        tgt_mean, _tgt_std, _cnt = aggregate_saved_probs_stats(stats_dir, Stream.TARGET)
+        order_indices = torch.argsort(tgt_mean.detach().to(dtype=torch.float64, device="cpu"), descending=True)
+        sort_info = "target-mean"
+        logger.info("Using target stream mean for sorting order across streams.")
+
     if top_ks is None:
         # Minimal fallback: just plot the full vocabulary
         top_ks = [-1]
@@ -488,6 +526,6 @@ def save_stream_visualizations(
         k_val = vocab_size if (k is None) or (isinstance(k, int) and (k <= 0 or k >= vocab_size)) else int(k)
         suffix = 'all' if k_val == vocab_size else k_val
         out_path = os.path.join(stats_dir, f"probs_stats_{s}_top_k_{suffix}.png")
-        created_path = visualize_per_token_stats(mean, std, out_path, top_k=k_val, stream_name=s)
+        created_path = visualize_per_token_stats(mean, std, out_path, top_k=k_val, stream_name=s, order_indices=order_indices, sort_info=sort_info)
         mapping[f"probs_stats/{s}/image_top_k_{suffix}"] = created_path
     return mapping

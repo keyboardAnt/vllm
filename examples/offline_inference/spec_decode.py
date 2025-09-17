@@ -228,10 +228,12 @@ def main():
     try:
         stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
         top_k_values = [10, 50, 100, 32_000, 64_000, None]
+        # Optional: path to external sorting scores tensor
+        sort_scores_path = os.environ.get("VLLM_PROBS_SORT_SCORES", None)
         # One-call helper: visualize all streams, return W&B-ready mapping and list
         wandb_mapping: dict[str, str] = {}
         for s in (Stream.TARGET, Stream.DRAFTER, Stream.DELTA):
-            wandb_mapping.update(save_stream_visualizations(stats_dir, s, top_k_values))
+            wandb_mapping.update(save_stream_visualizations(stats_dir, s, top_k_values, sort_scores_path=sort_scores_path))
         print("Saved per-token-id stats visualizations to stats directory.")
 
         # Optional: log to Weights & Biases if available

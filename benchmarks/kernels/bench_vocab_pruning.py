@@ -134,7 +134,7 @@ def bench(M, N, K, iters=5000, dtype=torch.float32, tf32=True):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Vector-Matrix matmul latency benchmark')
     parser.add_argument('--batches', type=int, nargs='+', default=[1, 16, 64, 128, 256, 512, 1024, 4096, 65536])
-    parser.add_argument('--hiddens', type=int, nargs='+', default=[1024, 4096])
+    parser.add_argument('--hiddens', type=int, nargs='+', default=[1024])
     parser.add_argument('--vocabs', type=int, nargs='+', default=[1024, 4096, 16384, 32000, 32768, 128000, 131072])
     parser.add_argument('--dtype', type=str, choices=list(DTYPE_MAP.keys()), default='bf16')
     parser.add_argument('--backend', type=str, choices=['torch'], default='torch')

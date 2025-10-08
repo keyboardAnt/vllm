@@ -227,7 +227,7 @@ def main():
     # from worker processes if available.
     try:
         stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
-        top_k_values = [10, 50, 100, 32_000, 64_000, None]
+        top_k_values = [10, 50, 100, 8_000, 16_000, 32_000, 64_000, None]
         # Optional: path to external sorting scores tensor
         sort_scores_path = os.environ.get("VLLM_PROBS_SORT_SCORES", None)
         # One-call helper: visualize all streams, return W&B-ready mapping and list

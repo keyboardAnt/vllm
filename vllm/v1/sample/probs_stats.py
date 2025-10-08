@@ -474,6 +474,90 @@ def visualize_per_token_stats(mean: torch.Tensor,
         return csv_path
 
 
+@torch.no_grad()
+def visualize_mean_std_correlation(mean: torch.Tensor,
+                                   std: torch.Tensor,
+                                   output_path: str,
+                                   stream_name: str | None = None,
+                                   order_indices: torch.Tensor | None = None,
+                                   top_k: int | None = None) -> str:
+    """Visualize correlation between per-token-id mean and std.
+
+    Produces a scatter plot with x=mean, y=std for the selected token ids.
+    If ``top_k`` is provided, selects the top-K tokens by the provided
+    ``order_indices`` (or by descending mean if not provided). Falls back
+    to writing a CSV with columns ``mean,std`` when plotting is unavailable.
+    """
+    if mean.dim() != 1 or std.dim() != 1:
+        raise ValueError("visualize_mean_std_correlation expects 1D mean and std tensors")
+
+    # Move to CPU float64 for stable plotting/saving.
+    mean_cpu = mean.detach().to(dtype=torch.float64, device="cpu")
+    std_cpu = std.detach().to(dtype=torch.float64, device="cpu")
+
+    # Select subset if requested
+    if top_k is not None and int(top_k) > 0 and int(top_k) < int(mean_cpu.numel()):
+        if order_indices is None:
+            order_t = torch.argsort(mean_cpu, descending=True)
+        else:
+            order_t = order_indices.detach().to(dtype=torch.long, device="cpu")
+        sel_t = order_t[: int(top_k)]
+        mean_sel = mean_cpu[sel_t]
+        std_sel = std_cpu[sel_t]
+    else:
+        mean_sel = mean_cpu
+        std_sel = std_cpu
+
+    try:
+        import os
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        x_vals = mean_sel.numpy()
+        y_vals = std_sel.numpy()
+
+        # Pearson correlation (guard small sample sizes)
+        if x_vals.size >= 2:
+            # np.corrcoef returns 2x2 matrix; [0,1] is the correlation
+            with np.errstate(all="ignore"):
+                pearson = float(np.corrcoef(x_vals, y_vals)[0, 1])
+        else:
+            pearson = float("nan")
+
+        fig = plt.figure(figsize=(10, 6))
+        ax = fig.add_subplot(1, 1, 1)
+        ax.scatter(x_vals, y_vals, s=8, color="purple", alpha=0.6)
+
+        title_prefix = f"[{stream_name}] " if stream_name else ""
+        subset_suffix = ""
+        if top_k is not None and int(top_k) > 0 and int(top_k) < int(mean_cpu.numel()):
+            subset_suffix = f" (top_k={int(top_k)})"
+        ax.set_title(f"{title_prefix}Per-token mean vs std scatter{subset_suffix}\nPearson r={pearson:.4f}")
+        ax.set_xlabel("Mean")
+        ax.set_ylabel("Std")
+        ax.grid(True, alpha=0.3)
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+        return output_path
+    except Exception:
+        # Fallback: save CSV with mean and std pairs
+        import os
+        import numpy as np
+        csv_path = output_path
+        if csv_path.lower().endswith((".png", ".jpg", ".jpeg")):
+            csv_path = os.path.splitext(csv_path)[0] + ".csv"
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        data = np.stack([mean_sel.numpy(), std_sel.numpy()], axis=1)
+        header = "mean,std"
+        np.savetxt(csv_path, data, delimiter=",", header=header, comments="", fmt=["%.10f", "%.10f"])
+        return csv_path
+
+
 def save_stream_visualizations(
     stats_dir: str,
     stream: "Stream | str",
@@ -528,4 +612,16 @@ def save_stream_visualizations(
         out_path = os.path.join(stats_dir, f"probs_stats_{s}_top_k_{suffix}.png")
         created_path = visualize_per_token_stats(mean, std, out_path, top_k=k_val, stream_name=s, order_indices=order_indices, sort_info=sort_info)
         mapping[f"probs_stats/{s}/image_top_k_{suffix}"] = created_path
+        # Also create a correlation visualization between mean and std when std is available
+        if std is not None:
+            corr_out_path = os.path.join(stats_dir, f"probs_stats_{s}_corr_top_k_{suffix}.png")
+            corr_created_path = visualize_mean_std_correlation(
+                mean,
+                std,
+                corr_out_path,
+                stream_name=s,
+                order_indices=order_indices,
+                top_k=k_val,
+            )
+            mapping[f"probs_stats/{s}/corr_top_k_{suffix}"] = corr_created_path
     return mapping

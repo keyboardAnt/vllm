@@ -79,6 +79,13 @@ class OnlineMeanStd:
         # Sum of squared deviations within the batch
         batch_M2 = ((x64 - batch_mean) * (x64 - batch_mean)).sum(dim=0)
 
+        logger.debug(
+            "OnlineMeanStd.update: batch_count=%d, feature_dim=%d, prev_count=%d",
+            batch_count,
+            x64.size(1),
+            self.count,
+        )
+
         total_count = self.count + batch_count
         if total_count == 0:
             return
@@ -88,6 +95,7 @@ class OnlineMeanStd:
         self.mean = self.mean + delta * (batch_count / total_count)
         self.M2 = self.M2 + batch_M2 + delta * delta * (self.count * batch_count / total_count)
         self.count = total_count
+        logger.debug("OnlineMeanStd.update: total_count=%d", self.count)
 
     @torch.no_grad()
     def get(self) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -180,11 +188,31 @@ def is_valid_probs(
     valid = is_finite and in_range and sums_close
 
     seen_true = _PROBS_VALID_SEEN_TRUE.get(s, False)
+    if not valid:
+        # Provide diagnostics, but avoid spamming at INFO level.
+        try:
+            min_sum = float(row_sums.min())
+            max_sum = float(row_sums.max())
+            mean_sum = float(row_sums.mean())
+        except Exception:  # noqa: BLE001
+            min_sum = max_sum = mean_sum = float("nan")
+        logger.debug(
+            "Invalid probs for stream '%s': is_finite=%s, in_range=%s, sums_close=%s, "
+            "row_sum[min=%.6e, max=%.6e, mean=%.6e]",
+            s,
+            is_finite,
+            in_range,
+            sums_close,
+            min_sum,
+            max_sum,
+            mean_sum,
+        )
     if seen_true and not valid:
         raise RuntimeError(
             f"Probability matrix for stream '{s}' became invalid after previously being valid."
         )
     if valid and not seen_true:
+        logger.info("First valid probability matrix observed for stream '%s'", s)
         _PROBS_VALID_SEEN_TRUE[s] = True
 
     return valid
@@ -225,6 +253,12 @@ def update_global_probs_stats(
             # to account for accumulation and prior tolerances on each stream.
             delta = probs_target - probs_drafter
             delta_row_sums = delta.to(torch.float64).sum(dim=-1)
+            logger.debug(
+                "delta_row_sums stats: min=%.6e, max=%.6e, mean=%.6e",
+                float(delta_row_sums.min()),
+                float(delta_row_sums.max()),
+                float(delta_row_sums.mean()),
+            )
             assert torch.allclose(
                 delta_row_sums, torch.zeros_like(delta_row_sums), rtol=0, atol=3e-4
             )
@@ -268,6 +302,13 @@ def update_global_probs_stats(
                 if stats.M2 is not None else None,
             }
             torch.save(payload, file_path)
+            logger.info(
+                "Saved probs stats to %s (stream=%s, count=%d, dim=%s)",
+                file_path,
+                stream_name,
+                payload["count"],
+                int(payload["mean"].numel()) if payload["mean"] is not None else None,
+            )
     except Exception as save_e:  # noqa: BLE001
         logger.debug(f"Failed to persist global probs stats: {save_e}")
 
@@ -315,6 +356,7 @@ def aggregate_saved_probs_stats(stats_dir: str, stream: "Stream | str") -> Tuple
     # Flat layout (legacy and current)
     pattern = os.path.join(stats_dir, f"probs_stats_{s}_*.pt")
     files = sorted(glob.glob(pattern))
+    logger.info("Found %d saved stats files for stream '%s' in %s", len(files), s, stats_dir)
     if not files:
         raise ValueError(f"No stats files found for stream '{s}' in {stats_dir}")
 
@@ -329,10 +371,13 @@ def aggregate_saved_probs_stats(stats_dir: str, stream: "Stream | str") -> Tuple
             mean = data.get("mean", None)
             M2 = data.get("M2", None)
             if cnt <= 0 or mean is None or M2 is None:
+                logger.debug("Skipping %s: missing or non-positive count/mean/M2", fp)
                 continue
             mean = mean.to(dtype=torch.float64, device="cpu")
             M2 = M2.to(dtype=torch.float64, device="cpu")
+            logger.debug("Loaded stats from %s: count=%d, dim=%d", fp, cnt, int(mean.numel()))
         except Exception:
+            logger.debug("Failed to load stats from %s; skipping", fp)
             continue
 
         if total_count == 0:
@@ -355,6 +400,14 @@ def aggregate_saved_probs_stats(stats_dir: str, stream: "Stream | str") -> Tuple
     else:
         var = torch.zeros_like(agg_M2)
     std = torch.sqrt(torch.clamp(var, min=0))
+    logger.info(
+        "Aggregated stats for stream '%s': total_count=%d, dim=%d, mean_mean=%.6f, std_mean=%.6f",
+        s,
+        total_count,
+        int(agg_mean.numel()),
+        float(agg_mean.mean()),
+        float(std.mean()),
+    )
     return agg_mean, std, total_count
 
 
@@ -443,6 +496,13 @@ def visualize_per_token_stats(mean: torch.Tensor,
         ax.grid(True, alpha=0.3)
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        logger.info(
+            "Saving per-token stats plot to %s (stream=%s, top_k=%d, order=%s)",
+            output_path,
+            stream_name,
+            top_k,
+            sort_info,
+        )
         fig.tight_layout()
         fig.savefig(output_path, dpi=200)
         plt.close(fig)
@@ -471,6 +531,13 @@ def visualize_per_token_stats(mean: torch.Tensor,
             data = np.stack([top_idx_np, top_vals_np], axis=1)
             header = "token_id,mean"
         np.savetxt(csv_path, data, delimiter=",", header=header, comments="", fmt=["%d", "%.10f"] + (["%.10f"] if std_cpu is not None else []))
+        logger.info(
+            "Matplotlib unavailable; wrote per-token stats CSV to %s (stream=%s, top_k=%d, order=%s)",
+            csv_path,
+            stream_name,
+            top_k,
+            sort_info,
+        )
         return csv_path
 
 
@@ -540,6 +607,13 @@ def visualize_mean_std_correlation(mean: torch.Tensor,
         ax.grid(True, alpha=0.3)
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        logger.info(
+            "Saving mean-std correlation plot to %s (stream=%s, top_k=%s, pearson=%.6f)",
+            output_path,
+            stream_name,
+            int(top_k) if top_k is not None else "all",
+            pearson,
+        )
         fig.tight_layout()
         fig.savefig(output_path, dpi=200)
         plt.close(fig)
@@ -555,6 +629,12 @@ def visualize_mean_std_correlation(mean: torch.Tensor,
         data = np.stack([mean_sel.numpy(), std_sel.numpy()], axis=1)
         header = "mean,std"
         np.savetxt(csv_path, data, delimiter=",", header=header, comments="", fmt=["%.10f", "%.10f"])
+        logger.info(
+            "Matplotlib unavailable; wrote mean-std correlation CSV to %s (stream=%s, top_k=%s)",
+            csv_path,
+            stream_name,
+            int(top_k) if top_k is not None else "all",
+        )
         return csv_path
 
 
@@ -605,6 +685,7 @@ def save_stream_visualizations(
         top_ks = [-1]
 
     mapping: dict[str, str] = {}
+    num_created = 0
     vocab_size = int(mean.numel())
     for k in top_ks:
         k_val = vocab_size if (k is None) or (isinstance(k, int) and (k <= 0 or k >= vocab_size)) else int(k)
@@ -612,6 +693,8 @@ def save_stream_visualizations(
         out_path = os.path.join(stats_dir, f"probs_stats_{s}_top_k_{suffix}.png")
         created_path = visualize_per_token_stats(mean, std, out_path, top_k=k_val, stream_name=s, order_indices=order_indices, sort_info=sort_info)
         mapping[f"probs_stats/{s}/image_top_k_{suffix}"] = created_path
+        num_created += 1
+        logger.debug("Created visualization: key=%s, path=%s", f"probs_stats/{s}/image_top_k_{suffix}", created_path)
         # Also create a correlation visualization between mean and std when std is available
         if std is not None:
             corr_out_path = os.path.join(stats_dir, f"probs_stats_{s}_corr_top_k_{suffix}.png")
@@ -624,4 +707,13 @@ def save_stream_visualizations(
                 top_k=k_val,
             )
             mapping[f"probs_stats/{s}/corr_top_k_{suffix}"] = corr_created_path
+            num_created += 1
+            logger.debug("Created visualization: key=%s, path=%s", f"probs_stats/{s}/corr_top_k_{suffix}", corr_created_path)
+    logger.info(
+        "Generated %d visualization artifacts for stream '%s' (top_ks=%s) into %s",
+        num_created,
+        s,
+        top_ks,
+        stats_dir,
+    )
     return mapping

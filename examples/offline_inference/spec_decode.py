@@ -228,7 +228,7 @@ def main():
         top_k_values = [10, 50, 100, 8_000, 16_000, 32_000, 64_000, None]
         # Pairplot threshold: only generate pairplots for top_k <= this value.
         # Keeps plotting time manageable while still providing a representative view.
-        top_k_threshold = 2000
+        top_k_threshold = 16_000
         # Optional: path to external sorting scores tensor
         sort_scores_path = os.environ.get("VLLM_PROBS_SORT_SCORES")
 

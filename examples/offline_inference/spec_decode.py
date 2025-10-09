@@ -11,11 +11,9 @@ from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
 from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
-from vllm.v1.sample.probs_stats import (
-    reset_global_probs_stats,
-    save_stream_visualizations,
-    Stream,
-)
+from vllm.v1.sample.probs_stats import (reset_global_probs_stats,
+                                        save_visualizations,
+                                        Stream)
 
 try:
     from vllm.utils import FlexibleArgumentParser
@@ -228,36 +226,46 @@ def main():
     try:
         stats_dir = os.environ.get("VLLM_PROBS_STATS_DIR", "probs_stats")
         top_k_values = [10, 50, 100, 8_000, 16_000, 32_000, 64_000, None]
+        # Pairplot threshold: only generate pairplots for top_k <= this value.
+        # Keeps plotting time manageable while still providing a representative view.
+        top_k_threshold = 2000
         # Optional: path to external sorting scores tensor
-        sort_scores_path = os.environ.get("VLLM_PROBS_SORT_SCORES", None)
-        # One-call helper: visualize all streams, return W&B-ready mapping and list
-        wandb_mapping: dict[str, str] = {}
-        for s in (Stream.TARGET, Stream.DRAFTER, Stream.DELTA):
-            wandb_mapping.update(save_stream_visualizations(stats_dir, s, top_k_values, sort_scores_path=sort_scores_path))
+        sort_scores_path = os.environ.get("VLLM_PROBS_SORT_SCORES")
+
+        # This single call aggregates stats and generates all visualizations,
+        # returning a mapping for W&B.
+        wandb_mapping = save_visualizations(
+            stats_dir=stats_dir,
+            top_ks=top_k_values,
+            sort_scores_path=sort_scores_path,
+            top_k_threshold=top_k_threshold,
+        )
         print("Saved per-token-id stats visualizations to stats directory.")
 
         # Optional: log to Weights & Biases if available
         try:
-            # Log images using the mapping; also upload all artifacts
             import wandb
             run = wandb.init(project="vllm-bench",
                              entity="redistributing-drafter-kernels",
-                             name=os.environ.get("WANDB_RUN_NAME", None),
-                             reinit="finish_previous")
-            wandb.log({k: wandb.Image(p) for k, p in wandb_mapping.items()})
-            artifact = wandb.Artifact(
-                name=os.environ.get("WANDB_ARTIFACT_NAME", f"probs-stats-{os.path.basename(stats_dir)}"),
-                type="probs-stats",
-                metadata={"stats_dir": stats_dir},
-            )
-            for root, _dirs, files in os.walk(stats_dir):
-                for fname in files:
-                    if fname.startswith("probs_stats_") and fname.split(".")[-1].lower() in {"pt", "png", "jpg", "jpeg", "csv"}:
-                        artifact.add_file(os.path.join(root, fname))
-            run.log_artifact(artifact)
-            run.finish()
-        except Exception as _wandb_e:  # noqa: BLE001
+                             name=os.environ.get("WANDB_RUN_NAME", None))
+            if run:
+                # Log images and create a final artifact
+                wandb.log({k: wandb.Image(p) for k, p in wandb_mapping.items() if p.endswith((".png", ".jpg", ".jpeg"))})
+                artifact = wandb.Artifact(
+                    name=os.environ.get("WANDB_ARTIFACT_NAME", f"probs-stats-{os.path.basename(stats_dir)}"),
+                    type="probs-stats",
+                    metadata={"stats_dir": stats_dir},
+                )
+                artifact.add_dir(stats_dir)
+                run.log_artifact(artifact)
+                # Ensure the run is properly closed
+                run.finish()
+                print("Finished logging visualizations to W&B.")
+        except ImportError:
+            print("wandb not installed, skipping logging.")
+        except Exception as _wandb_e:
             print(f"wandb logging skipped: {_wandb_e}")
+
     except Exception as e:  # noqa: BLE001
         print(f"Stats visualization skipped: {e}")
 

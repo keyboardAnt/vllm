@@ -212,7 +212,7 @@ def is_valid_probs(
             f"Probability matrix for stream '{s}' became invalid after previously being valid."
         )
     if valid and not seen_true:
-        logger.info("First valid probability matrix observed for stream '%s'", s)
+        logger.debug("First valid probability matrix observed for stream '%s'", s)
         _PROBS_VALID_SEEN_TRUE[s] = True
 
     return valid
@@ -239,7 +239,7 @@ def update_global_probs_stats(
     streams_to_update: list[tuple[Stream, torch.Tensor]] = []
 
     # Validate and enqueue target
-    logger.info(f"{probs_target.shape=}")
+    logger.debug(f"{probs_target.shape=}")
     if is_valid_probs(probs_target, Stream.TARGET):
         streams_to_update.append((Stream.TARGET, probs_target))
     else:
@@ -247,7 +247,7 @@ def update_global_probs_stats(
 
     # Validate drafter (if provided) and delta only if both are valid
     if probs_drafter is not None:
-        logger.info(f"{probs_drafter.shape=}")
+        logger.debug(f"{probs_drafter.shape=}")
         if is_valid_probs(probs_drafter, Stream.DRAFTER) and is_valid_probs(probs_target, Stream.TARGET):
             # Delta rows should sum to ~0. Use float64 and a slightly relaxed atol
             # to account for accumulation and prior tolerances on each stream.
@@ -266,7 +266,7 @@ def update_global_probs_stats(
         else:
             logger.debug("Skipping 'drafter' and 'delta' stats update: invalid probabilities (likely warmup)")
     else:
-        logger.info("probs_drafter=None; updating only the 'target' stream")
+        logger.debug("probs_drafter=None; updating only the 'target' stream")
 
     # Update per-stream accumulators
     for stream, x in streams_to_update:
@@ -274,7 +274,7 @@ def update_global_probs_stats(
         stats.update(x)
         try:
             mean, std = stats.get()
-            logger.info(
+            logger.debug(
                 "%s stats (global): count=%d, dim=%d, mean_mean=%.6f, std_mean=%.6f",
                 _normalize_stream(stream).value,
                 stats.count,
@@ -302,7 +302,7 @@ def update_global_probs_stats(
                 if stats.M2 is not None else None,
             }
             torch.save(payload, file_path)
-            logger.info(
+            logger.debug(
                 "Saved probs stats to %s (stream=%s, count=%d, dim=%s)",
                 file_path,
                 stream_name,
@@ -356,7 +356,7 @@ def aggregate_saved_probs_stats(stats_dir: str, stream: "Stream | str") -> Tuple
     # Flat layout (legacy and current)
     pattern = os.path.join(stats_dir, f"probs_stats_{s}_*.pt")
     files = sorted(glob.glob(pattern))
-    logger.info("Found %d saved stats files for stream '%s' in %s", len(files), s, stats_dir)
+    logger.debug("Found %d saved stats files for stream '%s' in %s", len(files), s, stats_dir)
     if not files:
         raise ValueError(f"No stats files found for stream '{s}' in {stats_dir}")
 
@@ -401,7 +401,7 @@ def aggregate_saved_probs_stats(stats_dir: str, stream: "Stream | str") -> Tuple
         var = torch.zeros_like(agg_M2)
     std = torch.sqrt(torch.clamp(var, min=0))
     logger.info(
-        "Aggregated stats for stream '%s': total_count=%d, dim=%d, mean_mean=%.6f, std_mean=%.6f",
+        "Aggregated stats for '%s': count=%d, dim=%d, mean=%.6f, std=%.6f",
         s,
         total_count,
         int(agg_mean.numel()),
@@ -496,7 +496,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
         ax.grid(True, alpha=0.3)
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        logger.info(
+        logger.debug(
             "Saving per-token stats plot to %s (stream=%s, top_k=%d, order=%s)",
             output_path,
             stream_name,
@@ -531,7 +531,7 @@ def visualize_per_token_stats(mean: torch.Tensor,
             data = np.stack([top_idx_np, top_vals_np], axis=1)
             header = "token_id,mean"
         np.savetxt(csv_path, data, delimiter=",", header=header, comments="", fmt=["%d", "%.10f"] + (["%.10f"] if std_cpu is not None else []))
-        logger.info(
+        logger.debug(
             "Matplotlib unavailable; wrote per-token stats CSV to %s (stream=%s, top_k=%d, order=%s)",
             csv_path,
             stream_name,
@@ -607,7 +607,7 @@ def visualize_mean_std_correlation(mean: torch.Tensor,
         ax.grid(True, alpha=0.3)
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        logger.info(
+        logger.debug(
             "Saving mean-std correlation plot to %s (stream=%s, top_k=%s, pearson=%.6f)",
             output_path,
             stream_name,
@@ -629,7 +629,7 @@ def visualize_mean_std_correlation(mean: torch.Tensor,
         data = np.stack([mean_sel.numpy(), std_sel.numpy()], axis=1)
         header = "mean,std"
         np.savetxt(csv_path, data, delimiter=",", header=header, comments="", fmt=["%.10f", "%.10f"])
-        logger.info(
+        logger.debug(
             "Matplotlib unavailable; wrote mean-std correlation CSV to %s (stream=%s, top_k=%s)",
             csv_path,
             stream_name,
@@ -638,50 +638,163 @@ def visualize_mean_std_correlation(mean: torch.Tensor,
         return csv_path
 
 
-def save_stream_visualizations(
+@torch.no_grad()
+def visualize_streams_pairplot(stats_dir: str,
+                               output_path: str,
+                               top_k: int | None = None) -> str:
+    """Create a pairplot across available per-token-id stats (mean/std) per stream.
+
+    Loads aggregated stats for target/drafter/delta (if present), constructs a
+    per-token table of columns like: target_mean, target_std, drafter_mean,
+    drafter_std, delta_mean, delta_std. Selects up to top_k tokens based on a
+    global order (target mean if available, else first available column).
+    """
+    # Load available streams' (mean, std)
+    available_columns: dict[str, torch.Tensor] = {}
+    for stream in (Stream.TARGET, Stream.DRAFTER, Stream.DELTA):
+        try:
+            mean_t, std_t, _ = aggregate_saved_probs_stats(stats_dir, stream)
+            prefix = _normalize_stream(stream).value
+            available_columns[f"{prefix}_mean"] = mean_t.detach().to(dtype=torch.float64, device="cpu")
+            available_columns[f"{prefix}_std"] = std_t.detach().to(dtype=torch.float64, device="cpu")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Pairplot: skipping stream %s: %s", _normalize_stream(stream).value, e)
+
+    if not available_columns:
+        raise ValueError("No aggregated stats found for any stream.")
+
+    # Determine global order (defaults to target_mean, else first available)
+    base_col = available_columns.get("target_mean", next(iter(available_columns.values())))
+    order_indices = torch.argsort(base_col, descending=True)
+    logger.debug("Pairplot: using %s for sorting order", "target_mean" if "target_mean" in available_columns else "first-available")
+
+    vocab_size = int(next(iter(available_columns.values())).numel())
+    k_val = vocab_size if (top_k is None) or (int(top_k) <= 0) or (int(top_k) >= vocab_size) else int(top_k)
+    sel_idx = order_indices[:k_val]
+
+    # Stable column order
+    ordered_keys = [
+        "target_mean", "target_std", "drafter_mean", "drafter_std", "delta_mean", "delta_std"
+    ]
+    columns = [k for k in ordered_keys if k in available_columns]
+
+    import numpy as np
+    matrix = np.vstack([available_columns[c][sel_idx].numpy() for c in columns]).T
+
+    try:
+        import os
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import seaborn as sns
+        import pandas as pd
+        import matplotlib.pyplot as plt
+
+        df = pd.DataFrame(matrix, columns=columns)
+        logger.info(
+            "Rendering seaborn.pairplot (top_k=%d, cols=%d, n=%d)",
+            k_val,
+            len(columns),
+            df.shape[0],
+        )
+        g = sns.pairplot(df, diag_kind="hist", plot_kws=dict(s=8, alpha=0.5))
+        g.fig.suptitle(f"Per-token pairplot (top_k={k_val}, cols={len(columns)}, n={len(df)})", y=1.02)
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        logger.debug("Saving streams pairplot to %s (top_k=%d, cols=%d, n=%d)", output_path, k_val, len(columns), len(df))
+        g.savefig(output_path, dpi=200)
+        plt.close(g.fig)
+        return output_path
+    except Exception as e:  # noqa: BLE001
+        # Fallback: save CSV of the selected table
+        import os
+        csv_path = output_path
+        if csv_path.lower().endswith((".png", ".jpg", ".jpeg")):
+            csv_path = os.path.splitext(csv_path)[0] + ".csv"
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        header = ",".join(columns)
+        np.savetxt(csv_path, matrix, delimiter=",", header=header, comments="")
+        logger.debug("Seaborn/matplotlib unavailable; wrote pairplot CSV to %s (top_k=%d, cols=%d, n=%d)", csv_path, k_val, len(columns), matrix.shape[0])
+        return csv_path
+
+
+@torch.no_grad()
+def visualize_streams_correlation_heatmap(stats_dir: str,
+                                          output_path: str) -> str:
+    """Create a 6x6 Pearson correlation heatmap across available stream stats.
+
+    Columns considered: target_mean, target_std, drafter_mean, drafter_std,
+    delta_mean, delta_std. Correlations are computed across token ids using
+    all available rows (full vocab) on CPU float64.
+    """
+    # Load available columns
+    available_columns: dict[str, torch.Tensor] = {}
+    for stream in (Stream.TARGET, Stream.DRAFTER, Stream.DELTA):
+        try:
+            mean_t, std_t, _ = aggregate_saved_probs_stats(stats_dir, stream)
+            prefix = _normalize_stream(stream).value
+            available_columns[f"{prefix}_mean"] = mean_t.detach().to(dtype=torch.float64, device="cpu")
+            available_columns[f"{prefix}_std"] = std_t.detach().to(dtype=torch.float64, device="cpu")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Heatmap: skipping stream %s: %s", _normalize_stream(stream).value, e)
+
+    if not available_columns:
+        raise ValueError("No aggregated stats found for any stream.")
+
+    ordered_keys = [
+        "target_mean", "target_std", "drafter_mean", "drafter_std", "delta_mean", "delta_std"
+    ]
+    columns = [k for k in ordered_keys if k in available_columns]
+
+    import numpy as np
+    import os
+    # Build full matrix [num_tokens, num_cols]
+    mat = np.vstack([available_columns[c].numpy() for c in columns]).T
+    # Compute Pearson correlation matrix across columns
+    with np.errstate(all="ignore"):
+        corr = np.corrcoef(mat, rowvar=False)
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        fig = plt.figure(figsize=(8, 6))
+        ax = fig.add_subplot(1, 1, 1)
+        sns.heatmap(corr, xticklabels=columns, yticklabels=columns, vmin=-1.0, vmax=1.0, cmap="coolwarm", annot=False, square=True, ax=ax)
+        ax.set_title("Per-token Pearson correlation across streams (full vocab)")
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        logger.debug("Saving streams correlation heatmap to %s", output_path)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+        return output_path
+    except Exception:
+        # Fallback: write CSV of the correlation matrix
+        csv_path = output_path
+        if csv_path.lower().endswith((".png", ".jpg", ".jpeg")):
+            csv_path = os.path.splitext(csv_path)[0] + ".csv"
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        header = ",".join(columns)
+        np.savetxt(csv_path, corr, delimiter=",", header=header, comments="")
+        logger.debug("Seaborn/matplotlib unavailable; wrote correlation heatmap CSV to %s", csv_path)
+        return csv_path
+
+def _generate_visualizations_for_stream(
     stats_dir: str,
     stream: "Stream | str",
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    order_indices: torch.Tensor,
+    sort_info: str,
     top_ks: list[int | None] | None = None,
     sort_scores_path: str | None = None,
+    top_k_threshold: int | None = None,
 ) -> dict[str, str]:
-    """Generate per-token-id visualizations for a stream and return a W&B mapping.
-
-    Loads aggregated stats for the given stream and writes PNG (or CSV fallback)
-    files to stats_dir.
-
-    Returns a mapping suitable for W&B logging: {"probs_stats/{stream}/image_top_k_{suffix}": path}.
+    """Generate per-token-id visualizations for a single stream using pre-aggregated stats.
     """
     s = _normalize_stream(stream).value
-    mean, std, _ = aggregate_saved_probs_stats(stats_dir, s)
-
-    # Establish a global order using either external sort scores or target means.
-    order_indices: torch.Tensor | None = None
-    sort_info: str | None = None
-    if sort_scores_path is not None:
-        try:
-            scores = torch.load(sort_scores_path, map_location="cpu")
-            if isinstance(scores, dict) and "tensor" in scores:
-                scores = scores["tensor"]
-            scores = torch.as_tensor(scores, dtype=torch.float64, device="cpu")
-            if scores.dim() != 1 or int(scores.numel()) != int(mean.numel()):
-                raise ValueError("Sorting scores must be a 1D tensor with length == vocab size")
-            order_indices = torch.argsort(scores, descending=True)
-            sort_info = f"external:{os.path.basename(sort_scores_path)}"
-            logger.info("Using external sorting scores at %s", sort_scores_path)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to load sort scores from %s (%s). Falling back to target means.", sort_scores_path, e)
-            sort_scores_path = None
-            order_indices = None
-
-    if order_indices is None:
-        # Default: use target stream means to define the order for all streams
-        tgt_mean, _tgt_std, _cnt = aggregate_saved_probs_stats(stats_dir, Stream.TARGET)
-        order_indices = torch.argsort(tgt_mean.detach().to(dtype=torch.float64, device="cpu"), descending=True)
-        sort_info = "target-mean"
-        logger.info("Using target stream mean for sorting order across streams.")
 
     if top_ks is None:
-        # Minimal fallback: just plot the full vocabulary
         top_ks = [-1]
 
     mapping: dict[str, str] = {}
@@ -695,7 +808,7 @@ def save_stream_visualizations(
         mapping[f"probs_stats/{s}/image_top_k_{suffix}"] = created_path
         num_created += 1
         logger.debug("Created visualization: key=%s, path=%s", f"probs_stats/{s}/image_top_k_{suffix}", created_path)
-        # Also create a correlation visualization between mean and std when std is available
+
         if std is not None:
             corr_out_path = os.path.join(stats_dir, f"probs_stats_{s}_corr_top_k_{suffix}.png")
             corr_created_path = visualize_mean_std_correlation(
@@ -709,11 +822,106 @@ def save_stream_visualizations(
             mapping[f"probs_stats/{s}/corr_top_k_{suffix}"] = corr_created_path
             num_created += 1
             logger.debug("Created visualization: key=%s, path=%s", f"probs_stats/{s}/corr_top_k_{suffix}", corr_created_path)
-    logger.info(
-        "Generated %d visualization artifacts for stream '%s' (top_ks=%s) into %s",
-        num_created,
-        s,
-        top_ks,
-        stats_dir,
-    )
+
+        if s == Stream.TARGET.value:
+            if top_k_threshold is not None and k_val > int(top_k_threshold):
+                logger.info("Skipping pairplot for top_k=%d > threshold=%d", k_val, int(top_k_threshold))
+                continue
+
+            logger.info(
+                "Starting pairplot for stream '%s' with top_k=%s (suffix=%s) -> generating %s",
+                s,
+                k_val,
+                suffix,
+                f"probs_stats_pairplot_top_k_{suffix}.png",
+            )
+            pairplot_path = os.path.join(stats_dir, f"probs_stats_pairplot_top_k_{suffix}.png")
+            pairplot_created_path = visualize_streams_pairplot(
+                stats_dir=stats_dir,
+                output_path=pairplot_path,
+                top_k=k_val,
+            )
+            mapping[f"probs_stats/pairplot_top_k_{suffix}"] = pairplot_created_path
+            num_created += 1
+            logger.debug("Created visualization: key=%s, path=%s", f"probs_stats/pairplot_top_k_{suffix}", pairplot_created_path)
+
+    if s == Stream.TARGET.value:
+        try:
+            heatmap_path = os.path.join(stats_dir, "probs_stats_corr_heatmap.png")
+            heatmap_created_path = visualize_streams_correlation_heatmap(stats_dir, heatmap_path)
+            mapping["probs_stats/corr_heatmap"] = heatmap_created_path
+            num_created += 1
+            logger.debug("Created visualization: key=%s, path=%s", "probs_stats/corr_heatmap", heatmap_created_path)
+        except Exception as e:
+            logger.debug("Failed to create correlation heatmap: %s", e)
+
+    logger.info("Generated %d visualization artifacts for '%s' into %s", num_created, s, stats_dir)
     return mapping
+
+
+def save_visualizations(
+    stats_dir: str,
+    top_ks: list[int | None] | None = None,
+    sort_scores_path: str | None = None,
+    top_k_threshold: int | None = None,
+) -> dict[str, str]:
+    """
+    Generate and save all visualizations, aggregating stats once.
+    """
+    aggregated_stats = {}
+    for stream in ALL_STREAMS:
+        try:
+            mean, std, count = aggregate_saved_probs_stats(stats_dir, stream)
+            aggregated_stats[stream.value] = {"mean": mean, "std": std, "count": count}
+        except Exception as e:
+            logger.debug("Could not aggregate stats for stream '%s': %s", stream.value, e)
+
+    if not aggregated_stats:
+        logger.warning("No stream data to visualize in %s", stats_dir)
+        return {}
+
+    order_indices: torch.Tensor | None = None
+    sort_info: str | None = None
+    if sort_scores_path:
+        try:
+            scores = torch.load(sort_scores_path, map_location="cpu")
+            if isinstance(scores, dict) and "tensor" in scores:
+                scores = scores["tensor"]
+            scores = torch.as_tensor(scores, dtype=torch.float64, device="cpu")
+            vocab_size = int(next(iter(aggregated_stats.values()))['mean'].numel())
+            if scores.dim() != 1 or int(scores.numel()) != vocab_size:
+                raise ValueError("Sorting scores must be a 1D tensor with length == vocab size")
+            order_indices = torch.argsort(scores, descending=True)
+            sort_info = f"external:{os.path.basename(sort_scores_path)}"
+            logger.info("Using external sorting scores at %s", sort_scores_path)
+        except Exception as e:
+            logger.warning("Failed to load sort scores from %s (%s). Falling back to target means.", sort_scores_path, e)
+            order_indices = None
+    
+    if order_indices is None and "target" in aggregated_stats:
+        target_mean = aggregated_stats["target"]["mean"]
+        order_indices = torch.argsort(target_mean.detach().to(dtype=torch.float64, device="cpu"), descending=True)
+        sort_info = "target-mean"
+        logger.info("Using target stream mean for sorting order across streams.")
+    elif order_indices is None:
+        first_stream_mean = next(iter(aggregated_stats.values()))['mean']
+        order_indices = torch.argsort(first_stream_mean.detach().to(dtype=torch.float64, device="cpu"), descending=True)
+        sort_info = "first-available-stream-mean"
+        logger.info("Target stream not found. Using first available stream for sorting order.")
+
+    all_mappings = {}
+    for stream_name, stats in aggregated_stats.items():
+        stream_mapping = _generate_visualizations_for_stream(
+            stats_dir=stats_dir,
+            stream=stream_name,
+            mean=stats["mean"],
+            std=stats["std"],
+            order_indices=order_indices,
+            sort_info=sort_info,
+            top_ks=top_ks,
+            sort_scores_path=sort_scores_path,
+            top_k_threshold=top_k_threshold,
+        )
+        all_mappings.update(stream_mapping)
+
+    return all_mappings

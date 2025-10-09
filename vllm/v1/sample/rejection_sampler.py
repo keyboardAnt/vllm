@@ -98,7 +98,7 @@ class RejectionSampler(nn.Module):
         
         if sampling_metadata.all_greedy:
             # NOTE: For greedy runs, `compute_probs` returns logits, hence applying softmax to target_logits to get probs. This assumes that the temperature is 1.0.
-            logger.info(f"{sampling_metadata.all_greedy=}, hence applying softmax to target_logits to get probs (assuming temperature is 1.0)")
+            logger.debug(f"{sampling_metadata.all_greedy=}, hence applying softmax to target_logits to get probs (assuming temperature is 1.0)")
             target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
             if draft_probs is not None:
                 # draft_probs are logits in greedy mode; normalize to probabilities

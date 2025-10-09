@@ -715,9 +715,10 @@ def visualize_streams_pairplot(stats_dir: str,
 @torch.no_grad()
 def visualize_streams_correlation_heatmap(stats_dir: str,
                                           aggregated_stats: dict,
-                                          output_path: str) -> str:
+                                          output_path: str,
+                                          top_k: int | None = None,
+                                          order_indices: torch.Tensor | None = None) -> str:
     """Create a 6x6 Pearson correlation heatmap across available stream stats.
-
     Columns considered: target_mean, target_std, drafter_mean, drafter_std,
     delta_mean, delta_std. Correlations are computed across token ids using
     all available rows (full vocab) on CPU float64.
@@ -732,6 +733,16 @@ def visualize_streams_correlation_heatmap(stats_dir: str,
     if not available_columns:
         raise ValueError("No aggregated stats found for any stream.")
 
+    # Determine global order if not provided
+    if order_indices is None:
+        base_col = available_columns.get("target_mean", next(iter(available_columns.values())))
+        order_indices = torch.argsort(base_col, descending=True)
+        logger.debug("Heatmap: using %s for sorting order", "target_mean" if "target_mean" in available_columns else "first-available")
+
+    vocab_size = int(next(iter(available_columns.values())).numel())
+    k_val = vocab_size if (top_k is None) or (isinstance(top_k, int) and (top_k <= 0 or top_k >= vocab_size)) else int(top_k)
+    sel_idx = order_indices[:k_val]
+
     ordered_keys = [
         "target_mean", "target_std", "drafter_mean", "drafter_std", "delta_mean", "delta_std"
     ]
@@ -739,8 +750,8 @@ def visualize_streams_correlation_heatmap(stats_dir: str,
 
     import numpy as np
     import os
-    # Build full matrix [num_tokens, num_cols]
-    mat = np.vstack([available_columns[c].numpy() for c in columns]).T
+    # Build matrix [num_tokens, num_cols] for the selected top-k
+    mat = np.vstack([available_columns[c][sel_idx].numpy() for c in columns]).T
     # Compute Pearson correlation matrix across columns
     with np.errstate(all="ignore"):
         corr = np.corrcoef(mat, rowvar=False)
@@ -763,7 +774,10 @@ def visualize_streams_correlation_heatmap(stats_dir: str,
                     fmt=".2f",
                     square=True,
                     ax=ax)
-        ax.set_title("Per-token Pearson correlation across streams (full vocab)")
+        
+        title_suffix = f"(top_k={k_val})" if k_val < vocab_size else "(full vocab)"
+        ax.set_title(f"Per-token Pearson correlation across streams {title_suffix}")
+
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         logger.debug("Saving streams correlation heatmap to %s", output_path)
         fig.tight_layout()
@@ -787,8 +801,8 @@ def _generate_visualizations_for_stream(
     aggregated_stats: dict,
     mean: torch.Tensor,
     std: torch.Tensor,
-    order_indices: torch.Tensor,
-    sort_info: str,
+    order_indices: torch.Tensor | None = None,
+    sort_info: str | None = None,
     top_ks: list[int | None] | None = None,
     sort_scores_path: str | None = None,
     top_k_threshold: int | None = None,
@@ -849,15 +863,21 @@ def _generate_visualizations_for_stream(
             num_created += 1
             logger.debug("Created visualization: key=%s, path=%s", f"probs_stats/pairplot_top_k_{suffix}", pairplot_created_path)
 
-    if s == Stream.TARGET.value:
-        try:
-            heatmap_path = os.path.join(stats_dir, "probs_stats_corr_heatmap.png")
-            heatmap_created_path = visualize_streams_correlation_heatmap(stats_dir, aggregated_stats, heatmap_path)
-            mapping["probs_stats/corr_heatmap"] = heatmap_created_path
-            num_created += 1
-            logger.debug("Created visualization: key=%s, path=%s", "probs_stats/corr_heatmap", heatmap_created_path)
-        except Exception as e:
-            logger.debug("Failed to create correlation heatmap: %s", e)
+            try:
+                heatmap_path = os.path.join(stats_dir, f"probs_stats_corr_heatmap_top_k_{suffix}.png")
+                heatmap_created_path = visualize_streams_correlation_heatmap(
+                    stats_dir,
+                    aggregated_stats,
+                    heatmap_path,
+                    top_k=k_val,
+                    order_indices=order_indices,
+                )
+                mapping[f"probs_stats/corr_heatmap_top_k_{suffix}"] = heatmap_created_path
+                num_created += 1
+                logger.debug("Created visualization: key=%s, path=%s", f"probs_stats/corr_heatmap_top_k_{suffix}", heatmap_created_path)
+            except Exception as e:
+                logger.debug("Failed to create correlation heatmap for top_k=%s: %s", suffix, e)
+
 
     logger.info("Generated %d visualization artifacts for '%s' into %s", num_created, s, stats_dir)
     return mapping

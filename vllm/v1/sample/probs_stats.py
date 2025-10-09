@@ -640,25 +640,21 @@ def visualize_mean_std_correlation(mean: torch.Tensor,
 
 @torch.no_grad()
 def visualize_streams_pairplot(stats_dir: str,
+                               aggregated_stats: dict,
                                output_path: str,
                                top_k: int | None = None) -> str:
     """Create a pairplot across available per-token-id stats (mean/std) per stream.
 
-    Loads aggregated stats for target/drafter/delta (if present), constructs a
-    per-token table of columns like: target_mean, target_std, drafter_mean,
+    Constructs a per-token table of columns like: target_mean, target_std, drafter_mean,
     drafter_std, delta_mean, delta_std. Selects up to top_k tokens based on a
     global order (target mean if available, else first available column).
     """
-    # Load available streams' (mean, std)
     available_columns: dict[str, torch.Tensor] = {}
-    for stream in (Stream.TARGET, Stream.DRAFTER, Stream.DELTA):
-        try:
-            mean_t, std_t, _ = aggregate_saved_probs_stats(stats_dir, stream)
-            prefix = _normalize_stream(stream).value
-            available_columns[f"{prefix}_mean"] = mean_t.detach().to(dtype=torch.float64, device="cpu")
-            available_columns[f"{prefix}_std"] = std_t.detach().to(dtype=torch.float64, device="cpu")
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Pairplot: skipping stream %s: %s", _normalize_stream(stream).value, e)
+    for stream_name, stats in aggregated_stats.items():
+        prefix = _normalize_stream(stream_name).value
+        if "mean" in stats and "std" in stats:
+            available_columns[f"{prefix}_mean"] = stats["mean"].detach().to(dtype=torch.float64, device="cpu")
+            available_columns[f"{prefix}_std"] = stats["std"].detach().to(dtype=torch.float64, device="cpu")
 
     if not available_columns:
         raise ValueError("No aggregated stats found for any stream.")
@@ -669,7 +665,7 @@ def visualize_streams_pairplot(stats_dir: str,
     logger.debug("Pairplot: using %s for sorting order", "target_mean" if "target_mean" in available_columns else "first-available")
 
     vocab_size = int(next(iter(available_columns.values())).numel())
-    k_val = vocab_size if (top_k is None) or (int(top_k) <= 0) or (int(top_k) >= vocab_size) else int(top_k)
+    k_val = vocab_size if (top_k is None) or (isinstance(top_k, int) and (top_k <= 0 or top_k >= vocab_size)) else int(top_k)
     sel_idx = order_indices[:k_val]
 
     # Stable column order
@@ -718,6 +714,7 @@ def visualize_streams_pairplot(stats_dir: str,
 
 @torch.no_grad()
 def visualize_streams_correlation_heatmap(stats_dir: str,
+                                          aggregated_stats: dict,
                                           output_path: str) -> str:
     """Create a 6x6 Pearson correlation heatmap across available stream stats.
 
@@ -725,16 +722,12 @@ def visualize_streams_correlation_heatmap(stats_dir: str,
     delta_mean, delta_std. Correlations are computed across token ids using
     all available rows (full vocab) on CPU float64.
     """
-    # Load available columns
     available_columns: dict[str, torch.Tensor] = {}
-    for stream in (Stream.TARGET, Stream.DRAFTER, Stream.DELTA):
-        try:
-            mean_t, std_t, _ = aggregate_saved_probs_stats(stats_dir, stream)
-            prefix = _normalize_stream(stream).value
-            available_columns[f"{prefix}_mean"] = mean_t.detach().to(dtype=torch.float64, device="cpu")
-            available_columns[f"{prefix}_std"] = std_t.detach().to(dtype=torch.float64, device="cpu")
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Heatmap: skipping stream %s: %s", _normalize_stream(stream).value, e)
+    for stream_name, stats in aggregated_stats.items():
+        prefix = _normalize_stream(stream_name).value
+        if "mean" in stats and "std" in stats:
+            available_columns[f"{prefix}_mean"] = stats["mean"].detach().to(dtype=torch.float64, device="cpu")
+            available_columns[f"{prefix}_std"] = stats["std"].detach().to(dtype=torch.float64, device="cpu")
 
     if not available_columns:
         raise ValueError("No aggregated stats found for any stream.")
@@ -760,7 +753,16 @@ def visualize_streams_correlation_heatmap(stats_dir: str,
 
         fig = plt.figure(figsize=(8, 6))
         ax = fig.add_subplot(1, 1, 1)
-        sns.heatmap(corr, xticklabels=columns, yticklabels=columns, vmin=-1.0, vmax=1.0, cmap="coolwarm", annot=False, square=True, ax=ax)
+        sns.heatmap(corr,
+                    xticklabels=columns,
+                    yticklabels=columns,
+                    vmin=-1.0,
+                    vmax=1.0,
+                    cmap="coolwarm",
+                    annot=True,
+                    fmt=".2f",
+                    square=True,
+                    ax=ax)
         ax.set_title("Per-token Pearson correlation across streams (full vocab)")
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         logger.debug("Saving streams correlation heatmap to %s", output_path)
@@ -782,6 +784,7 @@ def visualize_streams_correlation_heatmap(stats_dir: str,
 def _generate_visualizations_for_stream(
     stats_dir: str,
     stream: "Stream | str",
+    aggregated_stats: dict,
     mean: torch.Tensor,
     std: torch.Tensor,
     order_indices: torch.Tensor,
@@ -838,6 +841,7 @@ def _generate_visualizations_for_stream(
             pairplot_path = os.path.join(stats_dir, f"probs_stats_pairplot_top_k_{suffix}.png")
             pairplot_created_path = visualize_streams_pairplot(
                 stats_dir=stats_dir,
+                aggregated_stats=aggregated_stats,
                 output_path=pairplot_path,
                 top_k=k_val,
             )
@@ -848,7 +852,7 @@ def _generate_visualizations_for_stream(
     if s == Stream.TARGET.value:
         try:
             heatmap_path = os.path.join(stats_dir, "probs_stats_corr_heatmap.png")
-            heatmap_created_path = visualize_streams_correlation_heatmap(stats_dir, heatmap_path)
+            heatmap_created_path = visualize_streams_correlation_heatmap(stats_dir, aggregated_stats, heatmap_path)
             mapping["probs_stats/corr_heatmap"] = heatmap_created_path
             num_created += 1
             logger.debug("Created visualization: key=%s, path=%s", "probs_stats/corr_heatmap", heatmap_created_path)
@@ -914,6 +918,7 @@ def save_visualizations(
         stream_mapping = _generate_visualizations_for_stream(
             stats_dir=stats_dir,
             stream=stream_name,
+            aggregated_stats=aggregated_stats,
             mean=stats["mean"],
             std=stats["std"],
             order_indices=order_indices,
